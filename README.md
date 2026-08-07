@@ -18,6 +18,7 @@ IndustrialVisionPlatform/
     audio/                   demo 阶段的音频播放支持
     playback/                播放流程协调
     inference/               TensorRT / YOLO 推理模块占位
+    results/                 检测结果缓存、查询与统计
     network/                 epoll / TCP 通信模块占位
     storage/                 SQLite / 检测记录存储模块占位
 
@@ -35,6 +36,7 @@ IndustrialVisionPlatform/
 - `docs/module-4-frame-dispatcher.md`：帧分发与双消费队列
 - `docs/module-5-inference-interface.md`：推理接口与 MockDetector
 - `docs/module-6-detection-overlay.md`：检测结果回传与 UI 画框
+- `docs/module-7-result-management.md`：检测结果管理与统计
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -184,6 +186,27 @@ AI 推理模块。
 - `Preprocessor`
 - `Postprocessor`
 
+### modules/results
+
+检测结果管理模块。
+
+负责：
+- 接收一帧推理结果
+- 补齐结果的 sourceId、帧号和时间戳上下文
+- 保存有界的最近检测记录
+- 提供按帧查询和最近结果查询
+- 统计处理帧数、检测帧数、目标总数和类别数量
+
+当前类：
+- `ResultManager`
+- `ResultManagerConfig`
+- `DetectionSummary`
+
+说明：
+- 当前使用内存缓存，避免过早把 UI 和 SQLite 绑定
+- `maxStoredResults` 控制内存记录上限
+- 后续可以在 ResultManager 外侧增加 SQLite 持久化消费者
+
 ### modules/network
 
 网络通信模块占位。
@@ -240,6 +263,14 @@ VideoPlayer
   |                       |
   |                       v
   |                  VideoFrame -> QImage
+  |
+  |-----------------> Inference Consumer Thread
+  |                       |
+  |                       v
+  |                  IDetector -> DetectionResults
+  |                       |
+  |                       v
+  |                  ResultManager -> UI 统计 / 后续存储与网络发送
   |
   |-----------------> AudioPlayer
                           |
@@ -351,3 +382,20 @@ VideoPlayer
 - 为什么界面层只负责绘制，不直接参与推理逻辑
 - 如何把检测框坐标从原图映射到显示区域
 - `QPainter` 和 `paintEvent()` 的基本用法
+
+## 模块 7 当前状态
+
+模块 7：检测结果管理与统计。
+
+已完成：
+- 新增 `modules/results`
+- 新增线程安全的 `ResultManager`
+- 支持最近结果缓存、按帧查询和容量限制
+- 支持处理帧数、检测帧数、目标总数和类别统计
+- `MainWindow` 接入结果管理器，显示“当前帧检测数 / 累计检测数”
+
+学习重点：
+- 为什么结果管理不应该放进 `MainWindow`
+- 为什么缓存必须设置容量上限
+- 为什么“最近缓存”和“累计统计”要分开
+- `std::mutex` 如何保护跨线程查询和写入

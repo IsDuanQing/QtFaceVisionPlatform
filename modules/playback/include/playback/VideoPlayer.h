@@ -8,6 +8,7 @@
 #include <QImage>
 #include <QMetaType>
 #include <QObject>
+#include <QString>
 #include <QTimer>
 #include <mutex>
 #include <thread>
@@ -52,7 +53,11 @@ public:
 
 signals:
     void frameReady(const QImage& image, qint64 positionMs, qint64 frameIndex);
-    void detectionResultsReady(const ivp::DetectionResults& results);
+    void detectionResultsReady(
+        const ivp::DetectionResults& results,
+        qint64 frameIndex,
+        qint64 ptsMs,
+        const QString& sourceId);
     void stateChanged(bool opened, bool playing);
     void videoInfoChanged(int width, int height, double fps, qint64 durationMs);
     void audioInfoChanged(bool available, int sampleRate, int channels);

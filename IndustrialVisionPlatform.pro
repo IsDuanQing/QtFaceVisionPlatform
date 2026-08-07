@@ -22,6 +22,7 @@ SOURCES += \
         modules/inference/src/MockDetector.cpp \
         modules/pipeline/src/FrameDispatcher.cpp \
         modules/playback/src/VideoPlayer.cpp \
+        modules/results/src/ResultManager.cpp \
         modules/video/src/FFmpegDecoder.cpp \
         modules/video/src/FrameConverter.cpp
 
@@ -41,6 +42,7 @@ HEADERS += \
     modules/inference/include/inference/MockDetector.h \
     modules/pipeline/include/pipeline/FrameDispatcher.h \
     modules/playback/include/playback/VideoPlayer.h \
+    modules/results/include/results/ResultManager.h \
     modules/video/include/video/FFmpegDecoder.h \
     modules/video/include/video/FrameConverter.h \
     modules/video/include/video/VideoInputConfig.h
@@ -63,4 +65,5 @@ INCLUDEPATH += $$PWD/modules/common/include
 INCLUDEPATH += $$PWD/modules/inference/include
 INCLUDEPATH += $$PWD/modules/pipeline/include
 INCLUDEPATH += $$PWD/modules/playback/include
+INCLUDEPATH += $$PWD/modules/results/include
 INCLUDEPATH += $$PWD/modules/video/include

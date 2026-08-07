@@ -578,14 +578,17 @@ void VideoPlayer::inferenceLoop()
         }
 
         ivp::DetectionResults results = detector_->detect(*frame);
+        const qint64 frameIndex = frame->metadata.frameIndex;
+        const qint64 ptsMs = frame->metadata.ptsMs;
+        const QString sourceId = QString::fromStdString(frame->metadata.sourceId);
         ++consumedFrames;
         detectedObjects += static_cast<qint64>(results.size());
 
         // 推理线程不直接操作 UI，把结果投递回 VideoPlayer 所在线程。
         QMetaObject::invokeMethod(
             this,
-            [this, results = std::move(results)]() {
-                emit detectionResultsReady(results);
+            [this, results = std::move(results), frameIndex, ptsMs, sourceId]() {
+                emit detectionResultsReady(results, frameIndex, ptsMs, sourceId);
             },
             Qt::QueuedConnection);
 

@@ -30,6 +30,8 @@ QLabel* createMetricValue(const QString& text)
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
+      player_(),
+      resultManager_(),
       videoWidget_(nullptr),
       titleLabel_(nullptr),
       fileLabel_(nullptr),
@@ -39,6 +41,7 @@ MainWindow::MainWindow(QWidget* parent)
       audioValueLabel_(nullptr),
       statusValueLabel_(nullptr),
       positionValueLabel_(nullptr),
+      detectionValueLabel_(nullptr),
       openButton_(nullptr),
       rtspButton_(nullptr),
       playPauseButton_(nullptr),
@@ -66,6 +69,7 @@ void MainWindow::openVideo()
 
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading video..."));
+    resetDetectionSummary();
     fileLabel_->setText(filename);
 
     if (player_.open(filename))
@@ -102,6 +106,7 @@ void MainWindow::openRtspStream()
 
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Connecting to RTSP stream..."));
+    resetDetectionSummary();
     fileLabel_->setText(rtspUrl);
 
     if (player_.openRtsp(rtspUrl))
@@ -134,6 +139,7 @@ void MainWindow::stopVideo()
     player_.stop();
     positionValueLabel_->setText(QStringLiteral("00:00"));
     videoWidget_->setDetections(ivp::DetectionResults());
+    resetDetectionSummary();
 }
 
 void MainWindow::displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex)
@@ -142,9 +148,15 @@ void MainWindow::displayFrame(const QImage& image, qint64 positionMs, qint64 fra
     positionValueLabel_->setText(formatDuration(positionMs));
 }
 
-void MainWindow::displayDetections(const ivp::DetectionResults& results)
+void MainWindow::displayDetections(
+    const ivp::DetectionResults& results,
+    qint64 frameIndex,
+    qint64 ptsMs,
+    const QString& sourceId)
 {
+    resultManager_.addFrameResults(sourceId.toStdString(), frameIndex, ptsMs, results);
     videoWidget_->setDetections(results);
+    updateDetectionSummary();
 }
 
 void MainWindow::updatePlayerState(bool opened, bool playing)
@@ -164,6 +176,7 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
         durationValueLabel_->setText(QStringLiteral("--"));
         audioValueLabel_->setText(QStringLiteral("--"));
         positionValueLabel_->setText(QStringLiteral("00:00"));
+        resetDetectionSummary();
     }
 }
 
@@ -217,6 +230,7 @@ void MainWindow::buildUi()
     durationValueLabel_ = createMetricValue(QStringLiteral("--"));
     audioValueLabel_ = createMetricValue(QStringLiteral("--"));
     positionValueLabel_ = createMetricValue(QStringLiteral("00:00"));
+    detectionValueLabel_ = createMetricValue(QStringLiteral("0 / 0"));
     statusValueLabel_ = createMetricValue(tr("No Video"));
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
@@ -243,6 +257,8 @@ void MainWindow::buildUi()
     metricsLayout->addWidget(audioValueLabel_);
     metricsLayout->addWidget(createMetricLabel(tr("Position")));
     metricsLayout->addWidget(positionValueLabel_);
+    metricsLayout->addWidget(createMetricLabel(tr("Detections")));
+    metricsLayout->addWidget(detectionValueLabel_);
     metricsLayout->addWidget(createMetricLabel(tr("Status")));
     metricsLayout->addWidget(statusValueLabel_);
     metricsLayout->addStretch();
@@ -359,6 +375,31 @@ void MainWindow::connectSignals()
     connect(&player_, &VideoPlayer::videoInfoChanged, this, &MainWindow::updateVideoInfo);
     connect(&player_, &VideoPlayer::audioInfoChanged, this, &MainWindow::updateAudioInfo);
     connect(&player_, &VideoPlayer::errorOccurred, this, &MainWindow::showPlayerError);
+}
+
+void MainWindow::resetDetectionSummary()
+{
+    resultManager_.clear();
+    if (detectionValueLabel_ != nullptr)
+    {
+        detectionValueLabel_->setText(QStringLiteral("0 / 0"));
+    }
+}
+
+void MainWindow::updateDetectionSummary()
+{
+    const ivp::DetectionSummary summary = resultManager_.summary();
+    const ivp::DetectionResults latestResults = resultManager_.latestFrameResults();
+
+    if (detectionValueLabel_ == nullptr)
+    {
+        return;
+    }
+
+    detectionValueLabel_->setText(
+        QStringLiteral("%1 / %2")
+            .arg(static_cast<qulonglong>(latestResults.size()))
+            .arg(static_cast<qlonglong>(summary.totalObjects)));
 }
 
 QString MainWindow::formatDuration(qint64 milliseconds) const

@@ -8,6 +8,7 @@
 
 #include "common/DetectionResult.h"
 #include "playback/VideoPlayer.h"
+#include "results/ResultManager.h"
 #include "VideoDisplayWidget.h"
 
 class MainWindow final : public QMainWindow
@@ -24,7 +25,11 @@ private slots:
     void togglePlayPause();
     void stopVideo();
     void displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex);
-    void displayDetections(const ivp::DetectionResults& results);
+    void displayDetections(
+        const ivp::DetectionResults& results,
+        qint64 frameIndex,
+        qint64 ptsMs,
+        const QString& sourceId);
     void updatePlayerState(bool opened, bool playing);
     void updateVideoInfo(int width, int height, double fps, qint64 durationMs);
     void updateAudioInfo(bool available, int sampleRate, int channels);
@@ -34,9 +39,12 @@ private:
     void buildUi();
     void applyStyle();
     void connectSignals();
+    void resetDetectionSummary();
+    void updateDetectionSummary();
     QString formatDuration(qint64 milliseconds) const;
 
     VideoPlayer player_;
+    ivp::ResultManager resultManager_;
 
     VideoDisplayWidget* videoWidget_;
     QLabel* titleLabel_;
@@ -47,6 +55,7 @@ private:
     QLabel* audioValueLabel_;
     QLabel* statusValueLabel_;
     QLabel* positionValueLabel_;
+    QLabel* detectionValueLabel_;
 
     QPushButton* openButton_;
     QPushButton* rtspButton_;
