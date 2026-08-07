@@ -1,12 +1,15 @@
 #include "MainWindow.h"
 
 #include <QApplication>
+#include <QDebug>
+#include <QDir>
 #include <QFileDialog>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QStandardPaths>
 #include <QVBoxLayout>
 
 namespace
@@ -32,6 +35,8 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
       player_(),
       resultManager_(),
+      detectionStorage_(),
+      storageSessionId_(0),
       videoWidget_(nullptr),
       titleLabel_(nullptr),
       fileLabel_(nullptr),
@@ -42,6 +47,7 @@ MainWindow::MainWindow(QWidget* parent)
       statusValueLabel_(nullptr),
       positionValueLabel_(nullptr),
       detectionValueLabel_(nullptr),
+      storageValueLabel_(nullptr),
       openButton_(nullptr),
       rtspButton_(nullptr),
       playPauseButton_(nullptr),
@@ -50,7 +56,13 @@ MainWindow::MainWindow(QWidget* parent)
     buildUi();
     applyStyle();
     connectSignals();
+    initializeStorage();
     updatePlayerState(false, false);
+}
+
+MainWindow::~MainWindow()
+{
+    finishStorageSession();
 }
 
 void MainWindow::openVideo()
@@ -67,15 +79,21 @@ void MainWindow::openVideo()
         return;
     }
 
+    finishStorageSession();
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading video..."));
     resetDetectionSummary();
     fileLabel_->setText(filename);
+    startStorageSession(filename);
 
     if (player_.open(filename))
     {
         statusValueLabel_->setText(tr("Ready"));
         player_.play();
+    }
+    else
+    {
+        finishStorageSession();
     }
 }
 
@@ -104,15 +122,21 @@ void MainWindow::openRtspStream()
         return;
     }
 
+    finishStorageSession();
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Connecting to RTSP stream..."));
     resetDetectionSummary();
     fileLabel_->setText(rtspUrl);
+    startStorageSession(rtspUrl);
 
     if (player_.openRtsp(rtspUrl))
     {
         statusValueLabel_->setText(tr("Ready"));
         player_.play();
+    }
+    else
+    {
+        finishStorageSession();
     }
 }
 
@@ -140,6 +164,7 @@ void MainWindow::stopVideo()
     positionValueLabel_->setText(QStringLiteral("00:00"));
     videoWidget_->setDetections(ivp::DetectionResults());
     resetDetectionSummary();
+    finishStorageSession();
 }
 
 void MainWindow::displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex)
@@ -155,6 +180,20 @@ void MainWindow::displayDetections(
     const QString& sourceId)
 {
     resultManager_.addFrameResults(sourceId.toStdString(), frameIndex, ptsMs, results);
+    if (storageSessionId_ > 0
+        && !detectionStorage_.saveFrameResults(
+            storageSessionId_,
+            sourceId.toStdString(),
+            frameIndex,
+            ptsMs,
+            results))
+    {
+        qWarning() << "Could not persist detection results:"
+                   << QString::fromStdString(detectionStorage_.lastError());
+        finishStorageSession();
+        storageValueLabel_->setText(tr("Error"));
+    }
+
     videoWidget_->setDetections(results);
     updateDetectionSummary();
 }
@@ -168,6 +207,7 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
 
     if (!opened)
     {
+        finishStorageSession();
         videoWidget_->clear();
         videoWidget_->setPlaceholderText(tr("Open a video or RTSP stream to start inspection preview"));
         fileLabel_->setText(tr("No input selected"));
@@ -231,6 +271,7 @@ void MainWindow::buildUi()
     audioValueLabel_ = createMetricValue(QStringLiteral("--"));
     positionValueLabel_ = createMetricValue(QStringLiteral("00:00"));
     detectionValueLabel_ = createMetricValue(QStringLiteral("0 / 0"));
+    storageValueLabel_ = createMetricValue(tr("Off"));
     statusValueLabel_ = createMetricValue(tr("No Video"));
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
@@ -259,6 +300,8 @@ void MainWindow::buildUi()
     metricsLayout->addWidget(positionValueLabel_);
     metricsLayout->addWidget(createMetricLabel(tr("Detections")));
     metricsLayout->addWidget(detectionValueLabel_);
+    metricsLayout->addWidget(createMetricLabel(tr("Storage")));
+    metricsLayout->addWidget(storageValueLabel_);
     metricsLayout->addWidget(createMetricLabel(tr("Status")));
     metricsLayout->addWidget(statusValueLabel_);
     metricsLayout->addStretch();
@@ -375,6 +418,81 @@ void MainWindow::connectSignals()
     connect(&player_, &VideoPlayer::videoInfoChanged, this, &MainWindow::updateVideoInfo);
     connect(&player_, &VideoPlayer::audioInfoChanged, this, &MainWindow::updateAudioInfo);
     connect(&player_, &VideoPlayer::errorOccurred, this, &MainWindow::showPlayerError);
+}
+
+void MainWindow::initializeStorage()
+{
+    const QString storageDirectory =
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    const QString fallbackDirectory = QCoreApplication::applicationDirPath();
+    const QString resolvedDirectory = storageDirectory.isEmpty()
+        ? fallbackDirectory
+        : storageDirectory;
+
+    if (resolvedDirectory.isEmpty() || !QDir().mkpath(resolvedDirectory))
+    {
+        storageValueLabel_->setText(tr("Error"));
+        qWarning() << "Could not create storage directory:" << resolvedDirectory;
+        return;
+    }
+
+    const QString databasePath =
+        QDir(resolvedDirectory).filePath(QStringLiteral("inspection_records.db"));
+    if (!detectionStorage_.open(databasePath.toStdString()))
+    {
+        storageValueLabel_->setText(tr("Error"));
+        qWarning() << "Could not open SQLite storage:"
+                   << QString::fromStdString(detectionStorage_.lastError());
+        return;
+    }
+
+    storageValueLabel_->setText(tr("Ready"));
+}
+
+void MainWindow::startStorageSession(const QString& inputUrl)
+{
+    if (!detectionStorage_.isOpen())
+    {
+        initializeStorage();
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        return;
+    }
+
+    const std::string sourceId = inputUrl.toStdString();
+    storageSessionId_ = detectionStorage_.startSession(sourceId, sourceId);
+    if (storageSessionId_ <= 0)
+    {
+        storageValueLabel_->setText(tr("Error"));
+        qWarning() << "Could not start SQLite inspection session:"
+                   << QString::fromStdString(detectionStorage_.lastError());
+        return;
+    }
+
+    storageValueLabel_->setText(tr("Recording"));
+}
+
+void MainWindow::finishStorageSession()
+{
+    if (storageSessionId_ <= 0)
+    {
+        return;
+    }
+
+    if (!detectionStorage_.finishSession(storageSessionId_))
+    {
+        storageValueLabel_->setText(tr("Error"));
+        qWarning() << "Could not finish SQLite inspection session:"
+                   << QString::fromStdString(detectionStorage_.lastError());
+    }
+    else
+    {
+        storageValueLabel_->setText(tr("Ready"));
+    }
+
+    storageSessionId_ = 0;
 }
 
 void MainWindow::resetDetectionSummary()

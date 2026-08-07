@@ -10,5 +10,6 @@ target_link_libraries(IndustrialVisionViewer
     PRIVATE
         Qt5::Widgets
         ivp_results
+        ivp_storage
         ivp_playback
 )

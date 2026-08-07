@@ -12,7 +12,7 @@ modules/playback         播放流程协调
 modules/inference        推理接口、MockDetector、后续 TensorRT
 modules/results          检测结果缓存、查询与统计
 modules/network          epoll TCP 服务模块占位
-modules/storage          SQLite 检测结果存储模块占位
+modules/storage          SQLite 检测结果存储模块
 ```
 
 当前学习重点：

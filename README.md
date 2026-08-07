@@ -20,7 +20,7 @@ IndustrialVisionPlatform/
     inference/               TensorRT / YOLO 推理模块占位
     results/                 检测结果缓存、查询与统计
     network/                 epoll / TCP 通信模块占位
-    storage/                 SQLite / 检测记录存储模块占位
+    storage/                 SQLite / 检测记录存储模块
 
   docs/                      学习笔记与阶段性设计文档
   CMakeLists.txt             主 CMake 工程入口
@@ -37,6 +37,7 @@ IndustrialVisionPlatform/
 - `docs/module-5-inference-interface.md`：推理接口与 MockDetector
 - `docs/module-6-detection-overlay.md`：检测结果回传与 UI 画框
 - `docs/module-7-result-management.md`：检测结果管理与统计
+- `docs/module-8-sqlite-storage.md`：SQLite 检测结果存储
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -226,18 +227,22 @@ AI 推理模块。
 
 ### modules/storage
 
-数据存储模块占位。
+检测结果持久化模块。
 
-后续负责：
-- 使用 SQLite 存储检测记录
-- 管理缺陷类别、置信度、目标框、时间戳
-- 支持历史查询
-- 支持统计分析
+负责：
+- 将检测会话写入 SQLite
+- 将每帧检测结果写入数据库
+- 记录目标框、置信度、类别、帧号和时间戳
+- 支持按会话和帧号查询历史记录
+- 为后续统计和追溯提供持久化底座
 
-计划表：
-- `detection_records`
-- `defect_statistics`
-- `runtime_events`
+当前类：
+- `SQLiteDetectionStorage`
+
+说明：
+- 当前版本采用 SQLite C API
+- 写入时使用事务，保证一帧检测结果要么全写入，要么全回滚
+- 数据库文件默认放在应用本地数据目录
 
 ## 当前主流程
 
@@ -399,3 +404,20 @@ VideoPlayer
 - 为什么缓存必须设置容量上限
 - 为什么“最近缓存”和“累计统计”要分开
 - `std::mutex` 如何保护跨线程查询和写入
+
+## 模块 8 当前状态
+
+模块 8：SQLite 检测结果存储。
+
+已完成：
+- 新增 `modules/storage`
+- 新增 `SQLiteDetectionStorage`
+- 新增 `inspection_sessions`、`detection_frames`、`detection_records` 表
+- 使用事务写入一帧结果和该帧所有检测框
+- `MainWindow` 在播放时自动创建存储会话并写入 SQLite
+
+学习重点：
+- 为什么持久化层要和 UI 分离
+- 为什么一帧结果要放进同一个事务
+- 为什么要记录 session、frameIndex、ptsMs 和 sourceId
+- 为什么 SQLite 适合作为模块 8 的第一版存储后端

@@ -23,6 +23,7 @@ SOURCES += \
         modules/pipeline/src/FrameDispatcher.cpp \
         modules/playback/src/VideoPlayer.cpp \
         modules/results/src/ResultManager.cpp \
+        modules/storage/src/SQLiteDetectionStorage.cpp \
         modules/video/src/FFmpegDecoder.cpp \
         modules/video/src/FrameConverter.cpp
 
@@ -43,6 +44,7 @@ HEADERS += \
     modules/pipeline/include/pipeline/FrameDispatcher.h \
     modules/playback/include/playback/VideoPlayer.h \
     modules/results/include/results/ResultManager.h \
+    modules/storage/include/storage/SQLiteDetectionStorage.h \
     modules/video/include/video/FFmpegDecoder.h \
     modules/video/include/video/FrameConverter.h \
     modules/video/include/video/VideoInputConfig.h
@@ -57,7 +59,8 @@ LIBS += \
     -lavcodec \
     -lavutil \
     -lswscale \
-    -lswresample
+    -lswresample \
+    -lsqlite3
 
 INCLUDEPATH += $$PWD/apps/viewer
 INCLUDEPATH += $$PWD/modules/audio/include
@@ -66,4 +69,5 @@ INCLUDEPATH += $$PWD/modules/inference/include
 INCLUDEPATH += $$PWD/modules/pipeline/include
 INCLUDEPATH += $$PWD/modules/playback/include
 INCLUDEPATH += $$PWD/modules/results/include
+INCLUDEPATH += $$PWD/modules/storage/include
 INCLUDEPATH += $$PWD/modules/video/include

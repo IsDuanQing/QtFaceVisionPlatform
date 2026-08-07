@@ -1,6 +1,8 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <cstdint>
+
 #include <QImage>
 #include <QLabel>
 #include <QMainWindow>
@@ -9,6 +11,7 @@
 #include "common/DetectionResult.h"
 #include "playback/VideoPlayer.h"
 #include "results/ResultManager.h"
+#include "storage/SQLiteDetectionStorage.h"
 #include "VideoDisplayWidget.h"
 
 class MainWindow final : public QMainWindow
@@ -17,7 +20,7 @@ class MainWindow final : public QMainWindow
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
-    ~MainWindow() override = default;
+    ~MainWindow() override;
 
 private slots:
     void openVideo();
@@ -39,12 +42,17 @@ private:
     void buildUi();
     void applyStyle();
     void connectSignals();
+    void initializeStorage();
+    void startStorageSession(const QString& inputUrl);
+    void finishStorageSession();
     void resetDetectionSummary();
     void updateDetectionSummary();
     QString formatDuration(qint64 milliseconds) const;
 
     VideoPlayer player_;
     ivp::ResultManager resultManager_;
+    ivp::SQLiteDetectionStorage detectionStorage_;
+    std::int64_t storageSessionId_;
 
     VideoDisplayWidget* videoWidget_;
     QLabel* titleLabel_;
@@ -56,6 +64,7 @@ private:
     QLabel* statusValueLabel_;
     QLabel* positionValueLabel_;
     QLabel* detectionValueLabel_;
+    QLabel* storageValueLabel_;
 
     QPushButton* openButton_;
     QPushButton* rtspButton_;

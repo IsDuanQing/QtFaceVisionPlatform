@@ -12,6 +12,7 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Multimedia)
 find_package(Threads REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
@@ -33,3 +34,4 @@ add_subdirectory(modules/network)
 add_subdirectory(modules/storage)
 
 add_subdirectory(apps/viewer)
+add_subdirectory(tests)
