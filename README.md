@@ -34,6 +34,7 @@ IndustrialVisionPlatform/
 - `docs/module-3-rtsp-input.md`：RTSP 输入入口
 - `docs/module-4-frame-dispatcher.md`：帧分发与双消费队列
 - `docs/module-5-inference-interface.md`：推理接口与 MockDetector
+- `docs/module-6-detection-overlay.md`：检测结果回传与 UI 画框
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -47,6 +48,7 @@ Qt 可视化客户端。
 - 打开本地视频文件
 - 输入并打开 RTSP 视频流
 - 显示视频画面
+- 叠加显示检测框和标签
 - 显示分辨率、FPS、音频状态、播放状态等信息
 - 响应播放、暂停、停止等用户操作
 
@@ -141,6 +143,7 @@ Qt 可视化客户端。
 - 使用 `FrameDispatcher` 分发显示帧和推理帧
 - 将 `VideoFrame` 转换为 Qt 可显示的 `QImage`
 - 向 UI 层发送可显示帧
+- 向 UI 层发送检测结果
 - 启动推理消费线程
 - 处理播放、暂停、停止
 - 处理基础音画同步
@@ -331,3 +334,20 @@ VideoPlayer
 - `DetectionResult` 为什么属于公共模块
 - `MockDetector` 如何验证推理线程和队列链路
 - 后续如何把 `MockDetector` 替换成 `YoloTensorRTDetector`
+
+## 模块 6 当前状态
+
+模块 6：检测结果回传与 UI 画框。
+
+已完成：
+- `VideoPlayer` 新增 `detectionResultsReady` 信号
+- 推理线程把 `DetectionResults` 回传到 UI 线程
+- `apps/viewer` 新增 `VideoDisplayWidget`
+- `VideoDisplayWidget` 负责绘制视频帧和检测框
+- `MainWindow` 不再自己缩放 `QPixmap`，而是把帧和结果交给专用控件
+
+学习重点：
+- 为什么检测结果要从后台线程回到主线程
+- 为什么界面层只负责绘制，不直接参与推理逻辑
+- 如何把检测框坐标从原图映射到显示区域
+- `QPainter` 和 `paintEvent()` 的基本用法

@@ -6,12 +6,14 @@
 #include <memory>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QMetaType>
 #include <QObject>
 #include <QTimer>
 #include <mutex>
 #include <thread>
 
 #include "audio/AudioPlayer.h"
+#include "common/DetectionResult.h"
 #include "common/VideoFrame.h"
 #include "pipeline/FrameDispatcher.h"
 #include "video/FFmpegDecoder.h"
@@ -21,6 +23,8 @@ namespace ivp
 {
 class IDetector;
 }
+
+Q_DECLARE_METATYPE(ivp::DetectionResults)
 
 // Coordinates decoding, pixel conversion, and playback timing.
 // The decoder runs in a background producer thread while the UI thread
@@ -47,7 +51,8 @@ public:
     QString lastError() const;
 
 signals:
-    void frameReady(const QImage& image, qint64 positionMs);
+    void frameReady(const QImage& image, qint64 positionMs, qint64 frameIndex);
+    void detectionResultsReady(const ivp::DetectionResults& results);
     void stateChanged(bool opened, bool playing);
     void videoInfoChanged(int width, int height, double fps, qint64 durationMs);
     void audioInfoChanged(bool available, int sampleRate, int channels);

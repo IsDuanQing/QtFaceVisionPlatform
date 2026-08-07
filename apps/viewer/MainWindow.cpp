@@ -7,9 +7,6 @@
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QPixmap>
-#include <QResizeEvent>
-#include <QSizePolicy>
 #include <QVBoxLayout>
 
 namespace
@@ -33,7 +30,7 @@ QLabel* createMetricValue(const QString& text)
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
-      videoLabel_(nullptr),
+      videoWidget_(nullptr),
       titleLabel_(nullptr),
       fileLabel_(nullptr),
       resolutionValueLabel_(nullptr),
@@ -67,8 +64,8 @@ void MainWindow::openVideo()
         return;
     }
 
-    currentFrame_ = QImage();
-    videoLabel_->setText(tr("Loading video..."));
+    videoWidget_->clear();
+    videoWidget_->setPlaceholderText(tr("Loading video..."));
     fileLabel_->setText(filename);
 
     if (player_.open(filename))
@@ -103,8 +100,8 @@ void MainWindow::openRtspStream()
         return;
     }
 
-    currentFrame_ = QImage();
-    videoLabel_->setText(tr("Connecting to RTSP stream..."));
+    videoWidget_->clear();
+    videoWidget_->setPlaceholderText(tr("Connecting to RTSP stream..."));
     fileLabel_->setText(rtspUrl);
 
     if (player_.openRtsp(rtspUrl))
@@ -136,13 +133,18 @@ void MainWindow::stopVideo()
 {
     player_.stop();
     positionValueLabel_->setText(QStringLiteral("00:00"));
+    videoWidget_->setDetections(ivp::DetectionResults());
 }
 
-void MainWindow::displayFrame(const QImage& image, qint64 positionMs)
+void MainWindow::displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex)
 {
-    currentFrame_ = image;
+    videoWidget_->setFrame(image, positionMs, frameIndex);
     positionValueLabel_->setText(formatDuration(positionMs));
-    updateVideoPixmap();
+}
+
+void MainWindow::displayDetections(const ivp::DetectionResults& results)
+{
+    videoWidget_->setDetections(results);
 }
 
 void MainWindow::updatePlayerState(bool opened, bool playing)
@@ -154,7 +156,8 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
 
     if (!opened)
     {
-        videoLabel_->setText(tr("Open a video or RTSP stream to start inspection preview"));
+        videoWidget_->clear();
+        videoWidget_->setPlaceholderText(tr("Open a video or RTSP stream to start inspection preview"));
         fileLabel_->setText(tr("No input selected"));
         resolutionValueLabel_->setText(QStringLiteral("--"));
         fpsValueLabel_->setText(QStringLiteral("--"));
@@ -182,17 +185,11 @@ void MainWindow::updateAudioInfo(bool available, int sampleRate, int channels)
 void MainWindow::showPlayerError(const QString& message)
 {
     statusValueLabel_->setText(tr("Error"));
-    if (currentFrame_.isNull())
+    if (!videoWidget_->hasFrame())
     {
-        videoLabel_->setText(tr("Playback error"));
+        videoWidget_->setPlaceholderText(tr("Playback error"));
     }
     QMessageBox::warning(this, tr("Playback Error"), message);
-}
-
-void MainWindow::resizeEvent(QResizeEvent* event)
-{
-    QMainWindow::resizeEvent(event);
-    updateVideoPixmap();
 }
 
 void MainWindow::buildUi()
@@ -207,11 +204,7 @@ void MainWindow::buildUi()
     fileLabel_->setObjectName(QStringLiteral("fileLabel"));
     fileLabel_->setWordWrap(true);
 
-    videoLabel_ = new QLabel(tr("Open a video or RTSP stream to start inspection preview"));
-    videoLabel_->setObjectName(QStringLiteral("videoSurface"));
-    videoLabel_->setAlignment(Qt::AlignCenter);
-    videoLabel_->setMinimumSize(860, 520);
-    videoLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    videoWidget_ = new VideoDisplayWidget();
 
     openButton_ = new QPushButton(tr("Open File"));
     openButton_->setObjectName(QStringLiteral("primaryButton"));
@@ -259,7 +252,7 @@ void MainWindow::buildUi()
     mainLayout->setSpacing(16);
     mainLayout->addLayout(headerLayout);
     mainLayout->addWidget(fileLabel_);
-    mainLayout->addWidget(videoLabel_, 1);
+    mainLayout->addWidget(videoWidget_, 1);
     mainLayout->addWidget(infoPanel);
 
     setWindowTitle(tr("Industrial Vision Platform"));
@@ -361,29 +354,11 @@ void MainWindow::connectSignals()
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopVideo);
 
     connect(&player_, &VideoPlayer::frameReady, this, &MainWindow::displayFrame);
+    connect(&player_, &VideoPlayer::detectionResultsReady, this, &MainWindow::displayDetections);
     connect(&player_, &VideoPlayer::stateChanged, this, &MainWindow::updatePlayerState);
     connect(&player_, &VideoPlayer::videoInfoChanged, this, &MainWindow::updateVideoInfo);
     connect(&player_, &VideoPlayer::audioInfoChanged, this, &MainWindow::updateAudioInfo);
     connect(&player_, &VideoPlayer::errorOccurred, this, &MainWindow::showPlayerError);
-}
-
-void MainWindow::updateVideoPixmap()
-{
-    if (currentFrame_.isNull())
-    {
-        return;
-    }
-
-    const Qt::TransformationMode scalingMode = player_.isRtspSource()
-        ? Qt::FastTransformation
-        : Qt::SmoothTransformation;
-
-    // Scaling in the UI layer keeps the decoded frame reusable for inference.
-    const QPixmap pixmap = QPixmap::fromImage(currentFrame_).scaled(
-        videoLabel_->size(),
-        Qt::KeepAspectRatio,
-        scalingMode);
-    videoLabel_->setPixmap(pixmap);
 }
 
 QString MainWindow::formatDuration(qint64 milliseconds) const

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <QDebug>
+#include <QMetaType>
 #include <QMetaObject>
 
 #include "inference/IDetector.h"
@@ -51,6 +52,8 @@ VideoPlayer::VideoPlayer(QObject* parent)
       firstVideoPtsReady_(false),
       framePending_(false)
 {
+    qRegisterMetaType<ivp::DetectionResults>("ivp::DetectionResults");
+
     frameTimer_.setTimerType(Qt::PreciseTimer);
     connect(&frameTimer_, &QTimer::timeout, this, &VideoPlayer::consumeNextFrame);
     connect(&audioPlayer_, &AudioPlayer::errorOccurred, this, [this](const QString& message) {
@@ -327,11 +330,12 @@ void VideoPlayer::consumeFileFrame()
         return;
     }
 
+    const qint64 frameIndex = pendingFrame_->metadata.frameIndex;
     const QImage image = convertFrameToImage(std::move(pendingFrame_));
     if (!image.isNull())
     {
         lastVideoPositionMs_ = pendingFramePositionMs_;
-        emit frameReady(image, pendingFramePositionMs_);
+        emit frameReady(image, pendingFramePositionMs_, frameIndex);
     }
 
     pendingFrame_.reset();
@@ -368,11 +372,12 @@ void VideoPlayer::consumeRtspFrame()
     }
 
     const qint64 positionMs = normalizedFramePositionMs(*latestFrame);
+    const qint64 frameIndex = latestFrame->metadata.frameIndex;
     const QImage image = convertFrameToImage(std::move(latestFrame));
     if (!image.isNull())
     {
         lastVideoPositionMs_ = positionMs;
-        emit frameReady(image, positionMs);
+        emit frameReady(image, positionMs, frameIndex);
     }
 
     if (playing_)
@@ -572,9 +577,18 @@ void VideoPlayer::inferenceLoop()
             continue;
         }
 
-        const ivp::DetectionResults results = detector_->detect(*frame);
+        ivp::DetectionResults results = detector_->detect(*frame);
         ++consumedFrames;
         detectedObjects += static_cast<qint64>(results.size());
+
+        // 推理线程不直接操作 UI，把结果投递回 VideoPlayer 所在线程。
+        QMetaObject::invokeMethod(
+            this,
+            [this, results = std::move(results)]() {
+                emit detectionResultsReady(results);
+            },
+            Qt::QueuedConnection);
+
         if (consumedFrames % 30 == 0)
         {
             const double elapsedSeconds =
@@ -717,7 +731,8 @@ bool VideoPlayer::initializeDetector()
     ivp::DetectorConfig config;
     config.confidenceThreshold = 0.5F;
     config.simulatedDelayMs = kMockInferenceDelayMs;
-    config.detectEveryNFrames = 3;
+    // 模块 6 需要持续显示移动模拟框，因此先让 MockDetector 每帧产生结果。
+    config.detectEveryNFrames = 1;
 
     if (!detector_->initialize(config))
     {

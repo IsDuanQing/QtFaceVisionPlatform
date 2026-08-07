@@ -6,9 +6,9 @@
 #include <QMainWindow>
 #include <QPushButton>
 
+#include "common/DetectionResult.h"
 #include "playback/VideoPlayer.h"
-
-class QResizeEvent;
+#include "VideoDisplayWidget.h"
 
 class MainWindow final : public QMainWindow
 {
@@ -18,15 +18,13 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override = default;
 
-protected:
-    void resizeEvent(QResizeEvent* event) override;
-
 private slots:
     void openVideo();
     void openRtspStream();
     void togglePlayPause();
     void stopVideo();
-    void displayFrame(const QImage& image, qint64 positionMs);
+    void displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex);
+    void displayDetections(const ivp::DetectionResults& results);
     void updatePlayerState(bool opened, bool playing);
     void updateVideoInfo(int width, int height, double fps, qint64 durationMs);
     void updateAudioInfo(bool available, int sampleRate, int channels);
@@ -36,12 +34,11 @@ private:
     void buildUi();
     void applyStyle();
     void connectSignals();
-    void updateVideoPixmap();
     QString formatDuration(qint64 milliseconds) const;
 
     VideoPlayer player_;
 
-    QLabel* videoLabel_;
+    VideoDisplayWidget* videoWidget_;
     QLabel* titleLabel_;
     QLabel* fileLabel_;
     QLabel* resolutionValueLabel_;
@@ -55,8 +52,6 @@ private:
     QPushButton* rtspButton_;
     QPushButton* playPauseButton_;
     QPushButton* stopButton_;
-
-    QImage currentFrame_;
 };
 
 #endif // MAINWINDOW_H

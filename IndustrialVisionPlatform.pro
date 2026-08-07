@@ -17,6 +17,7 @@ DEFINES += QT_DEPRECATED_WARNINGS
 SOURCES += \
         apps/viewer/main.cpp \
         apps/viewer/MainWindow.cpp \
+        apps/viewer/VideoDisplayWidget.cpp \
         modules/audio/src/AudioPlayer.cpp \
         modules/inference/src/MockDetector.cpp \
         modules/pipeline/src/FrameDispatcher.cpp \
@@ -31,6 +32,7 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 
 HEADERS += \
     apps/viewer/MainWindow.h \
+    apps/viewer/VideoDisplayWidget.h \
     modules/audio/include/audio/AudioPlayer.h \
     modules/common/include/common/BlockingQueue.h \
     modules/common/include/common/DetectionResult.h \
