@@ -33,6 +33,7 @@ IndustrialVisionPlatform/
 - `docs/module-2-producer-consumer.md`：生产者-消费者队列
 - `docs/module-3-rtsp-input.md`：RTSP 输入入口
 - `docs/module-4-frame-dispatcher.md`：帧分发与双消费队列
+- `docs/module-5-inference-interface.md`：推理接口与 MockDetector
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -68,9 +69,10 @@ Qt 可视化客户端。
 - `VideoFrame`
 - `PixelFormat`
 - `BlockingQueue`
+- `DetectionResult`
+- `BoundingBox`
 
 后续会扩展：
-- `DetectionResult`
 - 时间戳与错误码工具
 
 ### modules/video
@@ -136,9 +138,10 @@ Qt 可视化客户端。
 负责：
 - 协调视频解码、显示适配、音频播放
 - 管理视频读取生产线程
-- 使用 `BlockingQueue<VideoFrame>` 缓冲解码帧
+- 使用 `FrameDispatcher` 分发显示帧和推理帧
 - 将 `VideoFrame` 转换为 Qt 可显示的 `QImage`
 - 向 UI 层发送可显示帧
+- 启动推理消费线程
 - 处理播放、暂停、停止
 - 处理基础音画同步
 
@@ -146,12 +149,23 @@ Qt 可视化客户端。
 - `VideoPlayer`
 
 后续目标：
-- 将播放流程和检测流程分离
-- 为推理模块提供帧分发接口
+- 将检测结果回传给 UI 绘制缺陷框
+- 继续减少播放模块对推理实现细节的了解
 
 ### modules/inference
 
-AI 推理模块占位。
+AI 推理模块。
+
+负责：
+- 定义推理接口
+- 定义推理参数
+- 输出结构化检测结果
+- 提供 `MockDetector` 验证推理链路
+
+当前类：
+- `IDetector`
+- `MockDetector`
+- `DetectorConfig`
 
 后续负责：
 - 加载 ONNX / TensorRT Engine
@@ -299,3 +313,21 @@ VideoPlayer
 - 显示和推理为什么不能抢同一个队列
 - 实时预览和推理任务的不同丢帧策略
 - `shared_ptr<const T>` 在跨线程只读共享中的作用
+
+## 模块 5 当前状态
+
+模块 5：推理接口与 `MockDetector`。
+
+已完成：
+- 新增 `DetectionResult` 和 `BoundingBox`
+- 新增 `IDetector` 推理接口
+- 新增 `DetectorConfig`
+- 新增 `MockDetector`
+- `VideoPlayer::inferenceLoop()` 接入 `IDetector::detect()`
+- Mock 推理结果会在日志中输出消费 FPS 和检测数量
+
+学习重点：
+- 推理接口为什么要先于 TensorRT 实现
+- `DetectionResult` 为什么属于公共模块
+- `MockDetector` 如何验证推理线程和队列链路
+- 后续如何把 `MockDetector` 替换成 `YoloTensorRTDetector`

@@ -9,7 +9,7 @@ modules/pipeline         帧分发与流水线队列
 modules/video            FFmpeg 视频解码与帧格式转换
 modules/audio            demo 阶段的音频播放支持
 modules/playback         播放流程协调
-modules/inference        TensorRT 推理模块占位
+modules/inference        推理接口、MockDetector、后续 TensorRT
 modules/network          epoll TCP 服务模块占位
 modules/storage          SQLite 检测结果存储模块占位
 ```
@@ -20,4 +20,5 @@ modules/storage          SQLite 检测结果存储模块占位
 2. 理解为什么 UI 层依赖 `ivp_playback`，而不是直接依赖 FFmpeg。
 3. 理解为什么 `modules/video` 要输出中立的 `ivp::VideoFrame`。
 4. 理解为什么 `modules/pipeline` 要把显示和推理拆成两条消费链路。
-5. 预习下一步重构目标：推理接口、检测结果结构、结果回传。
+5. 理解为什么先用 `IDetector` 和 `MockDetector` 打通推理链路。
+6. 预习下一步重构目标：检测结果回传、UI 画框、真实 TensorRT 推理。

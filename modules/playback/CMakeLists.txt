@@ -15,6 +15,7 @@ target_link_libraries(ivp_playback
         ivp_common
         ivp_pipeline
         ivp_audio
+        ivp_inference
         ivp_video
         Threads::Threads
 )

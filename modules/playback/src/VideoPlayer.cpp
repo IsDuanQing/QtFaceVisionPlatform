@@ -1,13 +1,16 @@
 #include "playback/VideoPlayer.h"
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
+#include <memory>
 #include <thread>
 #include <utility>
 
 #include <QDebug>
 #include <QMetaObject>
+
+#include "inference/IDetector.h"
+#include "inference/MockDetector.h"
 
 namespace
 {
@@ -23,6 +26,7 @@ VideoPlayer::VideoPlayer(QObject* parent)
     : QObject(parent),
       decoder_(),
       audioPlayer_(),
+      detector_(std::make_unique<ivp::MockDetector>()),
       frameDispatcher_(kFrameQueueCapacity, kInferenceQueueCapacity),
       pendingFrame_(),
       frameTimer_(),
@@ -129,6 +133,21 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
     fileName_ = config.url;
     sourceType_ = config.sourceType;
     opened_ = true;
+
+    if (!initializeDetector())
+    {
+        opened_ = false;
+        fileName_.clear();
+        sourceType_ = VideoSourceType::File;
+        hasAudio_ = false;
+        audioPlayer_.stop();
+        audioPlayer_.close();
+        decoder_.close();
+        emit audioInfoChanged(false, 0, 0);
+        emit errorOccurred(currentLastError());
+        emitState();
+        return false;
+    }
 
     if (!startProducerThread())
     {
@@ -530,7 +549,13 @@ void VideoPlayer::producerLoop()
 
 void VideoPlayer::inferenceLoop()
 {
+    if (detector_ == nullptr)
+    {
+        return;
+    }
+
     qint64 consumedFrames = 0;
+    qint64 detectedObjects = 0;
     QElapsedTimer elapsedTimer;
     elapsedTimer.start();
 
@@ -547,14 +572,17 @@ void VideoPlayer::inferenceLoop()
             continue;
         }
 
+        const ivp::DetectionResults results = detector_->detect(*frame);
         ++consumedFrames;
-        std::this_thread::sleep_for(std::chrono::milliseconds(kMockInferenceDelayMs));
+        detectedObjects += static_cast<qint64>(results.size());
         if (consumedFrames % 30 == 0)
         {
             const double elapsedSeconds =
                 std::max<qint64>(1, elapsedTimer.elapsed()) / 1000.0;
-            qDebug() << "Mock inference consumed frames:" << consumedFrames
+            qDebug() << QString::fromStdString(detector_->name())
+                     << "consumed frames:" << consumedFrames
                      << "fps:" << consumedFrames / elapsedSeconds
+                     << "detections:" << detectedObjects
                      << "latest frame:" << frame->metadata.frameIndex
                      << "pts(ms):" << frame->metadata.ptsMs;
         }
@@ -676,4 +704,26 @@ void VideoPlayer::resetSyncState()
 void VideoPlayer::emitState()
 {
     emit stateChanged(opened_, playing_);
+}
+
+bool VideoPlayer::initializeDetector()
+{
+    if (detector_ == nullptr)
+    {
+        setLastError(QStringLiteral("The inference detector is not available."));
+        return false;
+    }
+
+    ivp::DetectorConfig config;
+    config.confidenceThreshold = 0.5F;
+    config.simulatedDelayMs = kMockInferenceDelayMs;
+    config.detectEveryNFrames = 3;
+
+    if (!detector_->initialize(config))
+    {
+        setLastError(QStringLiteral("Could not initialize the inference detector."));
+        return false;
+    }
+
+    return true;
 }

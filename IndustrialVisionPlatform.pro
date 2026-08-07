@@ -18,6 +18,7 @@ SOURCES += \
         apps/viewer/main.cpp \
         apps/viewer/MainWindow.cpp \
         modules/audio/src/AudioPlayer.cpp \
+        modules/inference/src/MockDetector.cpp \
         modules/pipeline/src/FrameDispatcher.cpp \
         modules/playback/src/VideoPlayer.cpp \
         modules/video/src/FFmpegDecoder.cpp \
@@ -32,7 +33,10 @@ HEADERS += \
     apps/viewer/MainWindow.h \
     modules/audio/include/audio/AudioPlayer.h \
     modules/common/include/common/BlockingQueue.h \
+    modules/common/include/common/DetectionResult.h \
     modules/common/include/common/VideoFrame.h \
+    modules/inference/include/inference/IDetector.h \
+    modules/inference/include/inference/MockDetector.h \
     modules/pipeline/include/pipeline/FrameDispatcher.h \
     modules/playback/include/playback/VideoPlayer.h \
     modules/video/include/video/FFmpegDecoder.h \
@@ -54,6 +58,7 @@ LIBS += \
 INCLUDEPATH += $$PWD/apps/viewer
 INCLUDEPATH += $$PWD/modules/audio/include
 INCLUDEPATH += $$PWD/modules/common/include
+INCLUDEPATH += $$PWD/modules/inference/include
 INCLUDEPATH += $$PWD/modules/pipeline/include
 INCLUDEPATH += $$PWD/modules/playback/include
 INCLUDEPATH += $$PWD/modules/video/include

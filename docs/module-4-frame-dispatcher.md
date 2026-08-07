@@ -110,11 +110,11 @@ InferenceQueue -> inferenceLoop()
 5. 如果推理速度比视频 FPS 慢，当前代码会发生什么？
 6. 后面接 TensorRT 时，模拟推理线程应该替换成哪个类？
 
-## 下一步重构方向
+## 后续重构方向
 
-下一步可以开始模块 5：推理模块占位。
+模块 5：推理接口与 MockDetector 已经完成第一版。
 
-目标不是立刻上 TensorRT，而是先定义推理接口：
+当前推理链路已经变成：
 
 ```text
 InferenceQueue
@@ -126,4 +126,6 @@ IDetector / MockDetector
 DetectionResult
 ```
 
-先把推理输入、输出、线程边界定义清楚，再逐步接 YOLO / TensorRT。
+你可以继续阅读 `docs/module-5-inference-interface.md`。
+
+下一步建议做检测结果回传与 UI 画框。

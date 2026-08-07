@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QObject>
@@ -15,6 +16,11 @@
 #include "pipeline/FrameDispatcher.h"
 #include "video/FFmpegDecoder.h"
 #include "video/VideoInputConfig.h"
+
+namespace ivp
+{
+class IDetector;
+}
 
 // Coordinates decoding, pixel conversion, and playback timing.
 // The decoder runs in a background producer thread while the UI thread
@@ -77,9 +83,11 @@ private:
     QString currentLastError() const;
     void resetSyncState();
     void emitState();
+    bool initializeDetector();
 
     FFmpegDecoder decoder_;
     AudioPlayer audioPlayer_;
+    std::unique_ptr<ivp::IDetector> detector_;
     ivp::FrameDispatcher frameDispatcher_;
     ivp::VideoFramePtr pendingFrame_;
     QTimer frameTimer_;
