@@ -5,8 +5,8 @@
 
 enum class VideoSourceType
 {
-    File,
-    Rtsp
+    File, // 本地视频文件
+    Rtsp // RTSP网络监控流
 };
 
 // Describes where video frames come from.
@@ -15,11 +15,11 @@ enum class VideoSourceType
 struct VideoInputConfig
 {
     VideoSourceType sourceType = VideoSourceType::File;
-    QString url;
+    QString url; // 本地文件路径 或者 rtsp://xxx
     int openTimeoutMs = 5000;
-    int readTimeoutMs = 5000;
+    int readTimeoutMs = 5000; // 超时时间
 
-    static VideoInputConfig fromFile(const QString& filename)
+    static VideoInputConfig fromFile(const QString& filename) // 静态工厂函数
     {
         VideoInputConfig config;
         config.sourceType = VideoSourceType::File;
@@ -34,6 +34,10 @@ struct VideoInputConfig
         config.url = rtspUrl;
         return config;
     }
+
+    // 来自于工业相机
+    // TODO ...
+
 };
 
 #endif // VIDEOINPUTCONFIG_H

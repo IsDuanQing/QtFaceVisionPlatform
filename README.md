@@ -25,6 +25,14 @@ IndustrialVisionPlatform/
   IndustrialVisionPlatform.pro Qt Creator qmake 过渡入口
 ```
 
+## 学习文档
+
+- `docs/module-0-architecture.md`：工程骨架与模块边界
+- `docs/module-1-video-input.md`：视频输入模块重构
+- `docs/module-2-producer-consumer.md`：生产者-消费者队列
+- `docs/module-3-rtsp-input.md`：RTSP 输入入口
+- `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
+
 ## 模块职责
 
 ### apps/viewer

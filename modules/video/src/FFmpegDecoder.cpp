@@ -122,6 +122,9 @@ bool FFmpegDecoder::open(const VideoInputConfig& config)
         openTimeoutUs = QByteArray::number(static_cast<qint64>(openTimeoutMs) * 1000);
         readTimeoutUs = QByteArray::number(static_cast<qint64>(readTimeoutMs) * 1000);
         av_dict_set(&options, "rtsp_transport", "tcp", 0);
+        av_dict_set(&options, "buffer_size", "1048576", 0);
+        // Keep decoder reordering enabled. For H264 streams with B frames or
+        // missing references, forcing zero reorder delay caused playback failure.
         // Keep the legacy option for older FFmpeg builds and use the current
         // generic socket timeout option as well.
         av_dict_set(&options, "stimeout", openTimeoutUs.constData(), 0);

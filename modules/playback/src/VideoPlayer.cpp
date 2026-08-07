@@ -230,6 +230,11 @@ bool VideoPlayer::isPlaying() const
     return playing_;
 }
 
+bool VideoPlayer::isRtspSource() const
+{
+    return sourceType_ == VideoSourceType::Rtsp;
+}
+
 QString VideoPlayer::fileName() const
 {
     return fileName_;

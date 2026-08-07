@@ -36,6 +36,7 @@ public:
 
     bool isOpened() const;
     bool isPlaying() const;
+    bool isRtspSource() const;
     QString fileName() const;
     QString lastError() const;
 

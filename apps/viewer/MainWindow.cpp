@@ -374,11 +374,15 @@ void MainWindow::updateVideoPixmap()
         return;
     }
 
+    const Qt::TransformationMode scalingMode = player_.isRtspSource()
+        ? Qt::FastTransformation
+        : Qt::SmoothTransformation;
+
     // Scaling in the UI layer keeps the decoded frame reusable for inference.
     const QPixmap pixmap = QPixmap::fromImage(currentFrame_).scaled(
         videoLabel_->size(),
         Qt::KeepAspectRatio,
-        Qt::FastTransformation);
+        scalingMode);
     videoLabel_->setPixmap(pixmap);
 }
 

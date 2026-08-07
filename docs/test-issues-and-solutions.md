@@ -201,6 +201,73 @@ if ((decodedFrame_->flags & AV_FRAME_FLAG_CORRUPT) != 0
 
 应用层只能丢弃坏帧，不能修复已经损坏的压缩码流。真正稳定的方案仍然是保证 RTSP 源端和网络传输质量。
 
+### 如果花屏仍然没有减少
+
+这通常说明问题更偏向推流端，而不是 Qt 客户端。
+
+优先检查：
+
+1. RTSP server 是否在稳定推 H264/H265。
+2. 是否使用了 `-c copy` 直接转流，导致码流结构不适合实时播放。
+3. GOP 是否过长，关键帧间隔是否太大。
+4. 是否启用了 B 帧，导致重排序压力过高。
+5. 网络是否存在丢包、抖动或中间设备重传异常。
+
+更稳妥的本地测试方式是重新编码后再推 RTSP，而不是直接 copy：
+
+```bash
+ffmpeg -re -stream_loop -1 -i input.mp4 \
+  -c:v libx264 -preset veryfast -tune zerolatency \
+  -pix_fmt yuv420p -g 30 -keyint_min 30 -sc_threshold 0 -bf 0 \
+  -an -f rtsp rtsp://127.0.0.1:8554/test
+```
+
+如果 `ffplay` 或 VLC 也花屏，那就基本可以确认问题在推流端或网络端，不在本项目的 Qt 显示逻辑。
+
+你现在这条命令：
+
+```bash
+ffmpeg -re -stream_loop -1 -i D:/mv.mp4 -c:v libx264 -f rtsp rtsp://127.0.0.1:8554/test
+```
+
+问题就在于它使用了 x264 默认参数。默认配置会启用更激进的压缩策略，包含更长的 GOP 和 B 帧重排序，不适合拿来做低延迟 RTSP 预览。
+
+建议直接改成：
+
+```bash
+ffmpeg -re -stream_loop -1 -i D:/mv.mp4 -an \
+  -c:v libx264 -preset veryfast -tune zerolatency \
+  -pix_fmt yuv420p -profile:v baseline \
+  -g 25 -keyint_min 25 -sc_threshold 0 -bf 0 \
+  -x264-params repeat-headers=1 \
+  -rtsp_transport tcp -f rtsp rtsp://127.0.0.1:8554/test
+```
+
+### 已验证的失败尝试
+
+曾尝试把客户端调成更激进的低延迟和严格解码模式：
+
+```cpp
+av_dict_set(&options, "reorder_queue_size", "0", 0);
+av_dict_set(&options, "fflags", "+discardcorrupt+nobuffer", 0);
+formatCtx_->max_delay = 0;
+codecCtx_->err_recognition =
+    AV_EF_CAREFUL | AV_EF_COMPLIANT | AV_EF_AGGRESSIVE;
+```
+
+测试结果是视频直接无法播放，并出现大量 H264 参考帧错误：
+
+```text
+reference picture missing during reorder
+Missing reference picture
+mmco: unref short failure
+co located POCs unavailable
+```
+
+结论：
+
+这组参数不适合作为当前默认配置。它会把 H264 参考帧或 B 帧重排序问题放大，导致播放器从“花屏但能播”变成“直接无法播放”。当前代码已经撤回这些激进配置，优先保证 RTSP 可以播放。
+
 ## 6. 接收 RTSP 视频流时拖动 Qt 窗口卡顿
 
 ### 现象
@@ -262,7 +329,7 @@ static constexpr int kLivePreviewIntervalMs = 33;
 auto* imageBuffer = new std::vector<std::uint8_t>(std::move(frame.data));
 ```
 
-6. UI 缩放改为快速缩放：
+6. RTSP 预览缩放改为快速缩放，本地文件播放仍保留平滑缩放：
 
 ```cpp
 Qt::FastTransformation
