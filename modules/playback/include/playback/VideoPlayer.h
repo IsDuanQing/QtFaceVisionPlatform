@@ -11,8 +11,8 @@
 #include <thread>
 
 #include "audio/AudioPlayer.h"
-#include "common/BlockingQueue.h"
 #include "common/VideoFrame.h"
+#include "pipeline/FrameDispatcher.h"
 #include "video/FFmpegDecoder.h"
 #include "video/VideoInputConfig.h"
 
@@ -55,19 +55,22 @@ private:
     void clearProducerError();
     QString producerError() const;
     static constexpr std::size_t kFrameQueueCapacity = 8;
+    static constexpr std::size_t kInferenceQueueCapacity = 2;
     static constexpr int kLivePreviewIntervalMs = 33;
     static constexpr int kLivePreviewPollIntervalMs = 5;
+    static constexpr int kMockInferenceDelayMs = 8;
 
     int playbackIntervalMs() const;
     qint64 masterClockMs() const;
     qint64 normalizedFramePositionMs(const ivp::VideoFrame& frame);
-    QImage convertFrameToImage(ivp::VideoFrame frame) const;
+    QImage convertFrameToImage(ivp::VideoFramePtr frame) const;
     void consumeFileFrame();
     void consumeRtspFrame();
     bool openInput(const VideoInputConfig& config);
     bool startProducerThread();
     void stopProducerThread();
     void producerLoop();
+    void inferenceLoop();
     void handleProducerFinished();
     void setLastError(const QString& message);
     void clearLastError();
@@ -77,11 +80,12 @@ private:
 
     FFmpegDecoder decoder_;
     AudioPlayer audioPlayer_;
-    ivp::BlockingQueue<ivp::VideoFrame> frameQueue_;
-    ivp::VideoFrame pendingFrame_;
+    ivp::FrameDispatcher frameDispatcher_;
+    ivp::VideoFramePtr pendingFrame_;
     QTimer frameTimer_;
     QElapsedTimer fallbackClock_;
     std::thread producerThread_;
+    std::thread inferenceThread_;
     mutable std::mutex errorMutex_;
     QString fileName_;
     QString lastError_;
@@ -93,6 +97,7 @@ private:
     qint64 lastVideoPositionMs_;
     std::atomic<bool> producerStopRequested_;
     std::atomic<bool> producerFinished_;
+    std::atomic<bool> inferenceStopRequested_;
     bool hasAudio_;
     bool opened_;
     bool playing_;

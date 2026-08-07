@@ -23,6 +23,7 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 )
 
 add_subdirectory(modules/common)
+add_subdirectory(modules/pipeline)
 add_subdirectory(modules/video)
 add_subdirectory(modules/audio)
 add_subdirectory(modules/playback)

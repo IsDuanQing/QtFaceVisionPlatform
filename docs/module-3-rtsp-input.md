@@ -59,4 +59,4 @@ UI 层只知道“打开 RTSP”，不直接接触 FFmpeg 的 `AVFormatContext`�
 3. 播放过程中点击 Stop 是否能及时停止。
 4. 断开网络或关闭 RTSP 服务后，UI 是否能收到错误。
 
-验证通过后，再进入 `FrameDispatcher`，为显示和 TensorRT 推理拆出两条消费队列。
+验证通过后，已经进入 `FrameDispatcher`。你可以继续阅读 `docs/module-4-frame-dispatcher.md`，理解显示和 TensorRT 推理为什么要拆成两条消费队列。

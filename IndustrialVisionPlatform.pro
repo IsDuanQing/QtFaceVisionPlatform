@@ -18,6 +18,7 @@ SOURCES += \
         apps/viewer/main.cpp \
         apps/viewer/MainWindow.cpp \
         modules/audio/src/AudioPlayer.cpp \
+        modules/pipeline/src/FrameDispatcher.cpp \
         modules/playback/src/VideoPlayer.cpp \
         modules/video/src/FFmpegDecoder.cpp \
         modules/video/src/FrameConverter.cpp
@@ -32,6 +33,7 @@ HEADERS += \
     modules/audio/include/audio/AudioPlayer.h \
     modules/common/include/common/BlockingQueue.h \
     modules/common/include/common/VideoFrame.h \
+    modules/pipeline/include/pipeline/FrameDispatcher.h \
     modules/playback/include/playback/VideoPlayer.h \
     modules/video/include/video/FFmpegDecoder.h \
     modules/video/include/video/FrameConverter.h \
@@ -52,5 +54,6 @@ LIBS += \
 INCLUDEPATH += $$PWD/apps/viewer
 INCLUDEPATH += $$PWD/modules/audio/include
 INCLUDEPATH += $$PWD/modules/common/include
+INCLUDEPATH += $$PWD/modules/pipeline/include
 INCLUDEPATH += $$PWD/modules/playback/include
 INCLUDEPATH += $$PWD/modules/video/include

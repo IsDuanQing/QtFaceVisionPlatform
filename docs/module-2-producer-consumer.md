@@ -70,9 +70,14 @@ FrameDispatcher
 
 ## 下一步重构方向
 
-RTSP 输入入口已经作为模块 3 的第一版实现。你可以继续阅读 `docs/module-3-rtsp-input.md`。
+RTSP 输入入口已经作为模块 3 的第一版实现，帧分发已经作为模块 4 的第一版实现。
 
-之后再把队列消费端拆成两条链路：
+你可以继续阅读：
+
+- `docs/module-3-rtsp-input.md`
+- `docs/module-4-frame-dispatcher.md`
+
+当前已经把队列消费端拆成两条链路：
 
 ```text
 VideoFrame

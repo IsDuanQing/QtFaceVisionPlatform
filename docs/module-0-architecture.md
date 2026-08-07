@@ -5,6 +5,7 @@
 ```text
 apps/viewer              Qt 可视化客户端
 modules/common           公共数据结构
+modules/pipeline         帧分发与流水线队列
 modules/video            FFmpeg 视频解码与帧格式转换
 modules/audio            demo 阶段的音频播放支持
 modules/playback         播放流程协调
@@ -18,4 +19,5 @@ modules/storage          SQLite 检测结果存储模块占位
 1. 理解 `CMakeLists.txt` 如何把多个小模块组合成一个完整程序。
 2. 理解为什么 UI 层依赖 `ivp_playback`，而不是直接依赖 FFmpeg。
 3. 理解为什么 `modules/video` 要输出中立的 `ivp::VideoFrame`。
-4. 预习下一步重构目标：帧分发器、推理消费分支、检测结果结构。
+4. 理解为什么 `modules/pipeline` 要把显示和推理拆成两条消费链路。
+5. 预习下一步重构目标：推理接口、检测结果结构、结果回传。

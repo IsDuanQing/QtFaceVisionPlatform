@@ -13,6 +13,7 @@ IndustrialVisionPlatform/
 
   modules/
     common/                  公共数据结构与基础工具
+    pipeline/                帧分发、显示/推理消费队列
     video/                   视频输入、FFmpeg 解码、帧格式转换
     audio/                   demo 阶段的音频播放支持
     playback/                播放流程协调
@@ -31,6 +32,7 @@ IndustrialVisionPlatform/
 - `docs/module-1-video-input.md`：视频输入模块重构
 - `docs/module-2-producer-consumer.md`：生产者-消费者队列
 - `docs/module-3-rtsp-input.md`：RTSP 输入入口
+- `docs/module-4-frame-dispatcher.md`：帧分发与双消费队列
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -92,6 +94,24 @@ Qt 可视化客户端。
 - 支持 MP4、RTSP
 - 支持转换为 `cv::Mat`
 - 为 TensorRT 输入预处理提供帧数据
+
+### modules/pipeline
+
+帧分发与流水线协调模块。
+
+负责：
+- 接收解码后的 `VideoFrame`
+- 将帧分发到显示队列和推理队列
+- 为不同消费链路提供不同丢帧策略
+- 避免显示和推理直接抢同一个队列
+
+当前类：
+- `FrameDispatcher`
+
+后续目标：
+- 增加推理任务分发
+- 增加检测结果回传通道
+- 支持显示、推理、存储、网络发送之间的流水线拆分
 
 ### modules/audio
 
@@ -241,9 +261,9 @@ VideoPlayer
 - `std::thread`、`std::mutex`、`std::condition_variable`
 - 有界队列、阻塞等待、关闭唤醒
 
-下一阶段建议：
-- 增加 `FrameDispatcher`，为显示和推理分别准备消费队列
-- 等本地文件和 RTSP 两类输入都稳定后，再考虑增加 `IVideoSource` 多态接口
+后续演进：
+- `FrameDispatcher` 已在模块 4 中实现
+- 等显示、推理两条消费链路继续稳定后，再考虑增加 `IVideoSource` 多态接口
 
 ## 模块 3 当前状态
 
@@ -261,3 +281,21 @@ VideoPlayer
 - FFmpeg RTSP options：`rtsp_transport`、`stimeout`、`rw_timeout`
 - 网络流停止时为什么不能像文件一样 seek 回开头
 - UI 层为什么只调用 `VideoPlayer::openRtsp()`，不直接接触 FFmpeg
+
+## 模块 4 当前状态
+
+模块 4：帧分发 `FrameDispatcher`。
+
+已完成：
+- 新增 `modules/pipeline`
+- 新增 `FrameDispatcher`
+- 显示队列和推理队列分离
+- 显示链路继续由 Qt UI 消费
+- 推理链路先由模拟推理线程消费
+- 使用 `shared_ptr<const VideoFrame>` 避免大图像重复拷贝
+
+学习重点：
+- 多消费者队列设计
+- 显示和推理为什么不能抢同一个队列
+- 实时预览和推理任务的不同丢帧策略
+- `shared_ptr<const T>` 在跨线程只读共享中的作用

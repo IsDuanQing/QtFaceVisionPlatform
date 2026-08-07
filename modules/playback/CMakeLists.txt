@@ -13,6 +13,7 @@ target_link_libraries(ivp_playback
         Qt5::Core
         Qt5::Gui
         ivp_common
+        ivp_pipeline
         ivp_audio
         ivp_video
         Threads::Threads

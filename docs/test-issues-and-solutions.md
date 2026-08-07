@@ -302,16 +302,19 @@ RTSP 如果持续 25fps 或 30fps 推流，UI 线程每秒都要处理大量图�
 - 本地文件：按 PTS 和音频时钟同步，尽量完整播放。
 - RTSP：按实时预览策略，只显示最新帧。
 
-2. RTSP 队列满时丢弃最旧帧，避免延迟持续累积：
+2. RTSP 显示队列满时丢弃最旧帧，避免延迟持续累积：
 
 ```cpp
-frameQueue_.pushDropOldest(std::move(frame));
+frameDispatcher_.dispatch(
+    std::move(frame),
+    ivp::FrameQueuePolicy::DropOldest,
+    ivp::FrameQueuePolicy::DropOldest);
 ```
 
 3. RTSP UI 消费端每次取最新帧，丢弃队列里的旧帧：
 
 ```cpp
-while (frameQueue_.tryPop(&latestFrame))
+while (frameDispatcher_.tryPopDisplay(&latestFrame))
 {
     hasFrame = true;
 }
@@ -323,10 +326,10 @@ while (frameQueue_.tryPop(&latestFrame))
 static constexpr int kLivePreviewIntervalMs = 33;
 ```
 
-5. `QImage` 接管移动出来的帧内存，避免每帧 `copy()`：
+5. `QImage` 持有共享帧引用，避免每帧 `copy()`：
 
 ```cpp
-auto* imageBuffer = new std::vector<std::uint8_t>(std::move(frame.data));
+auto* frameReference = new ivp::VideoFramePtr(std::move(frame));
 ```
 
 6. RTSP 预览缩放改为快速缩放，本地文件播放仍保留平滑缩放：

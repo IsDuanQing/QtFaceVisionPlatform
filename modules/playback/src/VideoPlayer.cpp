@@ -1,19 +1,20 @@
 #include "playback/VideoPlayer.h"
 
 #include <algorithm>
-#include <cstdint>
+#include <chrono>
 #include <exception>
+#include <thread>
 #include <utility>
-#include <vector>
 
+#include <QDebug>
 #include <QMetaObject>
 
 namespace
 {
 
-void releaseImageBuffer(void* buffer)
+void releaseFrameReference(void* frame)
 {
-    delete static_cast<std::vector<std::uint8_t>*>(buffer);
+    delete static_cast<ivp::VideoFramePtr*>(frame);
 }
 
 } // namespace
@@ -22,11 +23,12 @@ VideoPlayer::VideoPlayer(QObject* parent)
     : QObject(parent),
       decoder_(),
       audioPlayer_(),
-      frameQueue_(kFrameQueueCapacity),
+      frameDispatcher_(kFrameQueueCapacity, kInferenceQueueCapacity),
       pendingFrame_(),
       frameTimer_(),
       fallbackClock_(),
       producerThread_(),
+      inferenceThread_(),
       errorMutex_(),
       fileName_(),
       lastError_(),
@@ -38,6 +40,7 @@ VideoPlayer::VideoPlayer(QObject* parent)
       lastVideoPositionMs_(0),
       producerStopRequested_(false),
       producerFinished_(false),
+      inferenceStopRequested_(false),
       hasAudio_(false),
       opened_(false),
       playing_(false),
@@ -272,7 +275,7 @@ void VideoPlayer::consumeFileFrame()
 {
     if (!framePending_)
     {
-        if (!frameQueue_.tryPop(&pendingFrame_))
+        if (!frameDispatcher_.tryPopDisplay(&pendingFrame_))
         {
             if (producerFinished_.load())
             {
@@ -284,7 +287,7 @@ void VideoPlayer::consumeFileFrame()
             return;
         }
 
-        pendingFramePositionMs_ = normalizedFramePositionMs(pendingFrame_);
+        pendingFramePositionMs_ = normalizedFramePositionMs(*pendingFrame_);
         framePending_ = true;
     }
 
@@ -299,7 +302,7 @@ void VideoPlayer::consumeFileFrame()
     if (hasAudio_ && delayMs < -120)
     {
         // Audio is the master clock. If video falls far behind, drop frames to catch up.
-        pendingFrame_ = ivp::VideoFrame();
+        pendingFrame_.reset();
         framePending_ = false;
         frameTimer_.start(0);
         return;
@@ -312,7 +315,7 @@ void VideoPlayer::consumeFileFrame()
         emit frameReady(image, pendingFramePositionMs_);
     }
 
-    pendingFrame_ = ivp::VideoFrame();
+    pendingFrame_.reset();
     framePending_ = false;
 
     if (playing_)
@@ -323,12 +326,12 @@ void VideoPlayer::consumeFileFrame()
 
 void VideoPlayer::consumeRtspFrame()
 {
-    ivp::VideoFrame latestFrame;
+    ivp::VideoFramePtr latestFrame;
     bool hasFrame = false;
 
     // RTSP is a live preview source. If the UI is briefly busy, stale frames are
     // less useful than the newest available frame, so drain the queue here.
-    while (frameQueue_.tryPop(&latestFrame))
+    while (frameDispatcher_.tryPopDisplay(&latestFrame))
     {
         hasFrame = true;
     }
@@ -345,7 +348,7 @@ void VideoPlayer::consumeRtspFrame()
         return;
     }
 
-    const qint64 positionMs = normalizedFramePositionMs(latestFrame);
+    const qint64 positionMs = normalizedFramePositionMs(*latestFrame);
     const QImage image = convertFrameToImage(std::move(latestFrame));
     if (!image.isNull())
     {
@@ -399,22 +402,24 @@ qint64 VideoPlayer::normalizedFramePositionMs(const ivp::VideoFrame& frame)
     return std::max<qint64>(0, rawPositionMs - firstVideoPtsMs_);
 }
 
-QImage VideoPlayer::convertFrameToImage(ivp::VideoFrame frame) const
+QImage VideoPlayer::convertFrameToImage(ivp::VideoFramePtr frame) const
 {
-    if (frame.empty() || frame.pixelFormat != ivp::PixelFormat::RGB24)
+    if (frame == nullptr || frame->empty() || frame->pixelFormat != ivp::PixelFormat::RGB24)
     {
         return QImage();
     }
 
-    auto* imageBuffer = new std::vector<std::uint8_t>(std::move(frame.data));
+    auto* frameReference = new ivp::VideoFramePtr(std::move(frame));
+    const ivp::VideoFrame* frameData = frameReference->get();
+
     return QImage(
-        imageBuffer->data(),
-        frame.metadata.width,
-        frame.metadata.height,
-        frame.strideBytes,
+        reinterpret_cast<const uchar*>(frameData->data.data()),
+        frameData->metadata.width,
+        frameData->metadata.height,
+        frameData->strideBytes,
         QImage::Format_RGB888,
-        releaseImageBuffer,
-        imageBuffer);
+        releaseFrameReference,
+        frameReference);
 }
 
 bool VideoPlayer::startProducerThread()
@@ -424,18 +429,28 @@ bool VideoPlayer::startProducerThread()
         return true;
     }
 
-    frameQueue_.reset();
+    frameDispatcher_.reset();
     producerStopRequested_.store(false);
+    inferenceStopRequested_.store(false);
     producerFinished_.store(false);
     clearProducerError();
     decoder_.clearInterruptRequest();
 
     try
     {
+        inferenceThread_ = std::thread(&VideoPlayer::inferenceLoop, this);
         producerThread_ = std::thread(&VideoPlayer::producerLoop, this);
     }
     catch (const std::exception& ex)
     {
+        producerStopRequested_.store(true);
+        inferenceStopRequested_.store(true);
+        frameDispatcher_.close();
+        if (inferenceThread_.joinable())
+        {
+            inferenceThread_.join();
+        }
+
         setLastError(QStringLiteral("Could not start the video producer thread: %1")
                          .arg(QString::fromUtf8(ex.what())));
         return false;
@@ -447,17 +462,24 @@ bool VideoPlayer::startProducerThread()
 void VideoPlayer::stopProducerThread()
 {
     producerStopRequested_.store(true);
+    inferenceStopRequested_.store(true);
     decoder_.requestInterrupt();
-    frameQueue_.close();
+    frameDispatcher_.close();
 
     if (producerThread_.joinable())
     {
         producerThread_.join();
     }
 
+    if (inferenceThread_.joinable())
+    {
+        inferenceThread_.join();
+    }
+
     decoder_.clearInterruptRequest();
-    frameQueue_.reset();
+    frameDispatcher_.reset();
     producerStopRequested_.store(false);
+    inferenceStopRequested_.store(false);
     producerFinished_.store(false);
 }
 
@@ -468,9 +490,14 @@ void VideoPlayer::producerLoop()
         ivp::VideoFrame frame;
         if (decoder_.readFrame(&frame))
         {
-            const bool queued = sourceType_ == VideoSourceType::Rtsp
-                ? frameQueue_.pushDropOldest(std::move(frame))
-                : frameQueue_.push(std::move(frame));
+            const ivp::FrameQueuePolicy displayPolicy = sourceType_ == VideoSourceType::Rtsp
+                ? ivp::FrameQueuePolicy::DropOldest
+                : ivp::FrameQueuePolicy::BlockWhenFull;
+
+            const bool queued = frameDispatcher_.dispatch(
+                std::move(frame),
+                displayPolicy,
+                ivp::FrameQueuePolicy::DropOldest);
 
             if (!queued)
             {
@@ -499,6 +526,39 @@ void VideoPlayer::producerLoop()
     }
 
     producerFinished_.store(true);
+}
+
+void VideoPlayer::inferenceLoop()
+{
+    qint64 consumedFrames = 0;
+    QElapsedTimer elapsedTimer;
+    elapsedTimer.start();
+
+    while (!inferenceStopRequested_.load())
+    {
+        ivp::VideoFramePtr frame;
+        if (!frameDispatcher_.popInference(&frame))
+        {
+            break;
+        }
+
+        if (frame == nullptr || frame->empty())
+        {
+            continue;
+        }
+
+        ++consumedFrames;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kMockInferenceDelayMs));
+        if (consumedFrames % 30 == 0)
+        {
+            const double elapsedSeconds =
+                std::max<qint64>(1, elapsedTimer.elapsed()) / 1000.0;
+            qDebug() << "Mock inference consumed frames:" << consumedFrames
+                     << "fps:" << consumedFrames / elapsedSeconds
+                     << "latest frame:" << frame->metadata.frameIndex
+                     << "pts(ms):" << frame->metadata.ptsMs;
+        }
+    }
 }
 
 void VideoPlayer::handleProducerFinished()
@@ -610,7 +670,7 @@ void VideoPlayer::resetSyncState()
     lastVideoPositionMs_ = 0;
     firstVideoPtsReady_ = false;
     framePending_ = false;
-    pendingFrame_ = ivp::VideoFrame();
+    pendingFrame_.reset();
 }
 
 void VideoPlayer::emitState()
