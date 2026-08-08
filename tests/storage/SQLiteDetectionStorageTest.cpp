@@ -37,6 +37,28 @@ int main()
     assert(recentResults.size() == 1);
     assert(recentResults.front().frameIndex == 42);
 
+    const ivp::InspectionSessionSummaries sessions = storage.recentSessions(5);
+    assert(sessions.size() == 1);
+    assert(sessions.front().sessionId == sessionId);
+    assert(sessions.front().frameCount == 2);
+    assert(sessions.front().objectCount == 1);
+    assert(sessions.front().endedAtMs.has_value());
+
+    const ivp::DetectionHistoryRows recentHistory = storage.recentHistory(5);
+    assert(recentHistory.size() == 1);
+    assert(recentHistory.front().sessionId == sessionId);
+    assert(recentHistory.front().frameIndex == 42);
+    assert(recentHistory.front().frameObjectCount == 1);
+
+    ivp::DetectionHistoryQuery query;
+    query.sessionId = sessionId;
+    query.sourceLike = std::string("camera");
+    query.classLike = std::string("SCR");
+    query.limit = 5;
+    const ivp::DetectionHistoryRows filteredHistory = storage.queryHistory(query);
+    assert(filteredHistory.size() == 1);
+    assert(filteredHistory.front().className == "scratch");
+
     storage.close();
     std::remove(databasePath);
     return 0;

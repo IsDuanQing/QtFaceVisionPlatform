@@ -1,16 +1,32 @@
 #include "MainWindow.h"
 
+#include "DetectionHistoryTableModel.h"
+
 #include <QApplication>
+#include <QAbstractItemView>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
+#include <QDateTime>
+#include <QDateTimeEdit>
 #include <QDir>
 #include <QFileDialog>
 #include <QFrame>
+#include <QHeaderView>
 #include <QHBoxLayout>
+#include <QList>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QSignalBlocker>
+#include <QSpinBox>
+#include <QSplitter>
 #include <QStandardPaths>
+#include <QTableView>
+#include <QVariant>
 #include <QVBoxLayout>
+
+#include <utility>
 
 namespace
 {
@@ -48,10 +64,23 @@ MainWindow::MainWindow(QWidget* parent)
       positionValueLabel_(nullptr),
       detectionValueLabel_(nullptr),
       storageValueLabel_(nullptr),
+      historyStatusLabel_(nullptr),
       openButton_(nullptr),
       rtspButton_(nullptr),
       playPauseButton_(nullptr),
-      stopButton_(nullptr)
+      stopButton_(nullptr),
+      historyRefreshButton_(nullptr),
+      historyClearButton_(nullptr),
+      historyModel_(nullptr),
+      historyTableView_(nullptr),
+      historySessionCombo_(nullptr),
+      historySourceEdit_(nullptr),
+      historyClassEdit_(nullptr),
+      historyStartCheck_(nullptr),
+      historyEndCheck_(nullptr),
+      historyStartEdit_(nullptr),
+      historyEndEdit_(nullptr),
+      historyLimitSpinBox_(nullptr)
 {
     buildUi();
     applyStyle();
@@ -83,17 +112,13 @@ void MainWindow::openVideo()
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading video..."));
     resetDetectionSummary();
-    fileLabel_->setText(filename);
-    startStorageSession(filename);
 
     if (player_.open(filename))
     {
+        fileLabel_->setText(filename);
+        startStorageSession(filename);
         statusValueLabel_->setText(tr("Ready"));
         player_.play();
-    }
-    else
-    {
-        finishStorageSession();
     }
 }
 
@@ -126,17 +151,13 @@ void MainWindow::openRtspStream()
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Connecting to RTSP stream..."));
     resetDetectionSummary();
-    fileLabel_->setText(rtspUrl);
-    startStorageSession(rtspUrl);
 
     if (player_.openRtsp(rtspUrl))
     {
+        fileLabel_->setText(rtspUrl);
+        startStorageSession(rtspUrl);
         statusValueLabel_->setText(tr("Ready"));
         player_.play();
-    }
-    else
-    {
-        finishStorageSession();
     }
 }
 
@@ -245,6 +266,94 @@ void MainWindow::showPlayerError(const QString& message)
     QMessageBox::warning(this, tr("Playback Error"), message);
 }
 
+void MainWindow::refreshHistory()
+{
+    if (historyModel_ == nullptr || historyStatusLabel_ == nullptr)
+    {
+        return;
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        historyModel_->clear();
+        historyStatusLabel_->setText(tr("Storage not ready"));
+        return;
+    }
+
+    reloadHistorySessions();
+    const ivp::DetectionHistoryQuery query = collectHistoryQuery();
+    if (query.recordedAfterMs.has_value()
+        && query.recordedBeforeMs.has_value()
+        && *query.recordedAfterMs > *query.recordedBeforeMs)
+    {
+        historyModel_->clear();
+        historyStatusLabel_->setText(tr("Invalid time range"));
+        return;
+    }
+
+    ivp::DetectionHistoryRows rows = detectionStorage_.queryHistory(query);
+    const std::string error = detectionStorage_.lastError();
+    if (!error.empty())
+    {
+        historyModel_->clear();
+        historyStatusLabel_->setText(tr("Query error"));
+        qWarning() << "Could not query detection history:" << QString::fromStdString(error);
+        return;
+    }
+
+    const int count = static_cast<int>(rows.size());
+    historyModel_->setRows(std::move(rows));
+    historyStatusLabel_->setText(QStringLiteral("%1 records").arg(count));
+    if (historyTableView_ != nullptr)
+    {
+        historyTableView_->resizeColumnsToContents();
+        historyTableView_->horizontalHeader()->setStretchLastSection(true);
+    }
+}
+
+void MainWindow::clearHistoryFilters()
+{
+    if (historySessionCombo_ != nullptr)
+    {
+        const QSignalBlocker blocker(historySessionCombo_);
+        historySessionCombo_->setCurrentIndex(0);
+    }
+    if (historySourceEdit_ != nullptr)
+    {
+        historySourceEdit_->clear();
+    }
+    if (historyClassEdit_ != nullptr)
+    {
+        historyClassEdit_->clear();
+    }
+    if (historyStartCheck_ != nullptr)
+    {
+        historyStartCheck_->setChecked(false);
+    }
+    if (historyEndCheck_ != nullptr)
+    {
+        historyEndCheck_->setChecked(false);
+    }
+
+    const QDateTime now = QDateTime::currentDateTime();
+    if (historyStartEdit_ != nullptr)
+    {
+        historyStartEdit_->setDateTime(now.addDays(-1));
+        historyStartEdit_->setEnabled(false);
+    }
+    if (historyEndEdit_ != nullptr)
+    {
+        historyEndEdit_->setDateTime(now);
+        historyEndEdit_->setEnabled(false);
+    }
+    if (historyLimitSpinBox_ != nullptr)
+    {
+        historyLimitSpinBox_->setValue(200);
+    }
+
+    refreshHistory();
+}
+
 void MainWindow::buildUi()
 {
     QWidget* centralWidget = new QWidget(this);
@@ -306,16 +415,106 @@ void MainWindow::buildUi()
     metricsLayout->addWidget(statusValueLabel_);
     metricsLayout->addStretch();
 
+    QWidget* livePanel = new QWidget();
+    QVBoxLayout* liveLayout = new QVBoxLayout(livePanel);
+    liveLayout->setContentsMargins(0, 0, 0, 0);
+    liveLayout->setSpacing(12);
+    liveLayout->addWidget(fileLabel_);
+    liveLayout->addWidget(videoWidget_, 1);
+    liveLayout->addWidget(infoPanel);
+
+    QSplitter* bodySplitter = new QSplitter(Qt::Vertical);
+    bodySplitter->setObjectName(QStringLiteral("bodySplitter"));
+    bodySplitter->addWidget(livePanel);
+    bodySplitter->addWidget(createHistoryPanel());
+    bodySplitter->setStretchFactor(0, 3);
+    bodySplitter->setStretchFactor(1, 2);
+    bodySplitter->setSizes(QList<int>() << 560 << 260);
+
     QVBoxLayout* mainLayout = new QVBoxLayout(centralWidget);
     mainLayout->setContentsMargins(24, 20, 24, 24);
     mainLayout->setSpacing(16);
     mainLayout->addLayout(headerLayout);
-    mainLayout->addWidget(fileLabel_);
-    mainLayout->addWidget(videoWidget_, 1);
-    mainLayout->addWidget(infoPanel);
+    mainLayout->addWidget(bodySplitter, 1);
 
     setWindowTitle(tr("Industrial Vision Platform"));
-    resize(1180, 780);
+    resize(1280, 860);
+}
+
+QWidget* MainWindow::createHistoryPanel()
+{
+    QFrame* panel = new QFrame();
+    panel->setObjectName(QStringLiteral("historyPanel"));
+
+    historyModel_ = new DetectionHistoryTableModel(this);
+    historyTableView_ = new QTableView(panel);
+    historyTableView_->setModel(historyModel_);
+    historyTableView_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    historyTableView_->setSelectionMode(QAbstractItemView::SingleSelection);
+    historyTableView_->setAlternatingRowColors(true);
+    historyTableView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    historyTableView_->setSortingEnabled(false);
+    historyTableView_->verticalHeader()->setVisible(false);
+    historyTableView_->horizontalHeader()->setStretchLastSection(true);
+    historyTableView_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    historyTableView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    historyTableView_->setMinimumHeight(220);
+
+    historySessionCombo_ = new QComboBox(panel);
+    historySessionCombo_->setMinimumWidth(240);
+    historySourceEdit_ = new QLineEdit(panel);
+    historySourceEdit_->setPlaceholderText(tr("Source contains"));
+    historyClassEdit_ = new QLineEdit(panel);
+    historyClassEdit_->setPlaceholderText(tr("Class contains"));
+    historyStartCheck_ = new QCheckBox(tr("After"), panel);
+    historyEndCheck_ = new QCheckBox(tr("Before"), panel);
+    historyStartEdit_ = new QDateTimeEdit(QDateTime::currentDateTime().addDays(-1), panel);
+    historyStartEdit_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
+    historyStartEdit_->setCalendarPopup(true);
+    historyStartEdit_->setEnabled(false);
+    historyEndEdit_ = new QDateTimeEdit(QDateTime::currentDateTime(), panel);
+    historyEndEdit_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
+    historyEndEdit_->setCalendarPopup(true);
+    historyEndEdit_->setEnabled(false);
+    historyLimitSpinBox_ = new QSpinBox(panel);
+    historyLimitSpinBox_->setRange(10, 5000);
+    historyLimitSpinBox_->setSingleStep(50);
+    historyLimitSpinBox_->setValue(200);
+    historyRefreshButton_ = new QPushButton(tr("Refresh"), panel);
+    historyClearButton_ = new QPushButton(tr("Clear"), panel);
+    historyStatusLabel_ = createMetricValue(tr("0 records"));
+    historyStatusLabel_->setObjectName(QStringLiteral("historyStatusLabel"));
+
+    QHBoxLayout* filterLayout = new QHBoxLayout();
+    filterLayout->setContentsMargins(0, 0, 0, 0);
+    filterLayout->setSpacing(10);
+    filterLayout->addWidget(historySessionCombo_);
+    filterLayout->addWidget(historySourceEdit_, 1);
+    filterLayout->addWidget(historyClassEdit_, 1);
+    filterLayout->addWidget(historyStartCheck_);
+    filterLayout->addWidget(historyStartEdit_);
+    filterLayout->addWidget(historyEndCheck_);
+    filterLayout->addWidget(historyEndEdit_);
+    filterLayout->addWidget(createMetricLabel(tr("Limit")));
+    filterLayout->addWidget(historyLimitSpinBox_);
+    filterLayout->addWidget(historyRefreshButton_);
+    filterLayout->addWidget(historyClearButton_);
+
+    QHBoxLayout* statusLayout = new QHBoxLayout();
+    statusLayout->setContentsMargins(0, 0, 0, 0);
+    statusLayout->setSpacing(10);
+    statusLayout->addWidget(createMetricLabel(tr("History")));
+    statusLayout->addWidget(historyStatusLabel_);
+    statusLayout->addStretch();
+
+    QVBoxLayout* panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(18, 14, 18, 14);
+    panelLayout->setSpacing(12);
+    panelLayout->addLayout(filterLayout);
+    panelLayout->addWidget(historyTableView_, 1);
+    panelLayout->addLayout(statusLayout);
+
+    return panel;
 }
 
 void MainWindow::applyStyle()
@@ -355,6 +554,12 @@ void MainWindow::applyStyle()
             border-radius: 8px;
         }
 
+        #historyPanel {
+            background: #151C19;
+            border: 1px solid #324138;
+            border-radius: 8px;
+        }
+
         #metricLabel {
             color: #8FA399;
             font-size: 12px;
@@ -365,6 +570,60 @@ void MainWindow::applyStyle()
             color: #F2F7F3;
             font-size: 14px;
             font-weight: 600;
+        }
+
+        #historyStatusLabel {
+            color: #F2F7F3;
+        }
+
+        QTableView {
+            background: #0E1411;
+            alternate-background-color: #121915;
+            color: #E7EEE9;
+            gridline-color: #2D3A33;
+            border: 1px solid #2D3A33;
+            selection-background-color: #2E6B57;
+            selection-color: #FFFFFF;
+        }
+
+        QHeaderView::section {
+            background: #22302A;
+            color: #DCE5DF;
+            border: 0;
+            border-bottom: 1px solid #33433B;
+            padding: 6px 8px;
+            font-weight: 600;
+        }
+
+        QLineEdit, QComboBox, QDateTimeEdit, QSpinBox {
+            background: #0F1512;
+            border: 1px solid #33433B;
+            border-radius: 6px;
+            color: #F0F5F1;
+            padding: 7px 10px;
+        }
+
+        QComboBox::drop-down {
+            border: 0;
+            width: 20px;
+        }
+
+        QCheckBox {
+            color: #C8D2CC;
+            spacing: 6px;
+        }
+
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #4B6156;
+            border-radius: 3px;
+            background: #0F1512;
+        }
+
+        QCheckBox::indicator:checked {
+            background: #1F8A70;
+            border-color: #42B995;
         }
 
         QPushButton {
@@ -411,6 +670,17 @@ void MainWindow::connectSignals()
     connect(rtspButton_, &QPushButton::clicked, this, &MainWindow::openRtspStream);
     connect(playPauseButton_, &QPushButton::clicked, this, &MainWindow::togglePlayPause);
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopVideo);
+    connect(historyRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshHistory);
+    connect(historyClearButton_, &QPushButton::clicked, this, &MainWindow::clearHistoryFilters);
+    connect(historySourceEdit_, &QLineEdit::returnPressed, this, &MainWindow::refreshHistory);
+    connect(historyClassEdit_, &QLineEdit::returnPressed, this, &MainWindow::refreshHistory);
+    connect(historyStartCheck_, &QCheckBox::toggled, historyStartEdit_, &QDateTimeEdit::setEnabled);
+    connect(historyEndCheck_, &QCheckBox::toggled, historyEndEdit_, &QDateTimeEdit::setEnabled);
+    connect(
+        historySessionCombo_,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        &MainWindow::refreshHistory);
 
     connect(&player_, &VideoPlayer::frameReady, this, &MainWindow::displayFrame);
     connect(&player_, &VideoPlayer::detectionResultsReady, this, &MainWindow::displayDetections);
@@ -447,6 +717,8 @@ void MainWindow::initializeStorage()
     }
 
     storageValueLabel_->setText(tr("Ready"));
+    reloadHistorySessions();
+    refreshHistory();
 }
 
 void MainWindow::startStorageSession(const QString& inputUrl)
@@ -472,6 +744,7 @@ void MainWindow::startStorageSession(const QString& inputUrl)
     }
 
     storageValueLabel_->setText(tr("Recording"));
+    reloadHistorySessions();
 }
 
 void MainWindow::finishStorageSession()
@@ -490,9 +763,99 @@ void MainWindow::finishStorageSession()
     else
     {
         storageValueLabel_->setText(tr("Ready"));
+        refreshHistory();
     }
 
     storageSessionId_ = 0;
+}
+
+void MainWindow::reloadHistorySessions()
+{
+    if (historySessionCombo_ == nullptr)
+    {
+        return;
+    }
+
+    const qlonglong selectedSessionId =
+        historySessionCombo_->currentData().toLongLong();
+    const QSignalBlocker blocker(historySessionCombo_);
+
+    historySessionCombo_->clear();
+    historySessionCombo_->addItem(tr("All sessions"), QVariant::fromValue<qlonglong>(0));
+
+    if (!detectionStorage_.isOpen())
+    {
+        return;
+    }
+
+    const ivp::InspectionSessionSummaries sessions =
+        detectionStorage_.recentSessions(100);
+    int selectedIndex = 0;
+    for (const ivp::InspectionSessionSummary& session : sessions)
+    {
+        historySessionCombo_->addItem(
+            formatSessionLabel(session),
+            QVariant::fromValue<qlonglong>(static_cast<qlonglong>(session.sessionId)));
+        if (session.sessionId == selectedSessionId)
+        {
+            selectedIndex = historySessionCombo_->count() - 1;
+        }
+    }
+
+    historySessionCombo_->setCurrentIndex(selectedIndex);
+}
+
+ivp::DetectionHistoryQuery MainWindow::collectHistoryQuery() const
+{
+    ivp::DetectionHistoryQuery query;
+
+    if (historySessionCombo_ != nullptr)
+    {
+        const qlonglong sessionId = historySessionCombo_->currentData().toLongLong();
+        if (sessionId > 0)
+        {
+            query.sessionId = static_cast<std::int64_t>(sessionId);
+        }
+    }
+
+    if (historySourceEdit_ != nullptr)
+    {
+        const QString source = historySourceEdit_->text().trimmed();
+        if (!source.isEmpty())
+        {
+            query.sourceLike = source.toStdString();
+        }
+    }
+
+    if (historyClassEdit_ != nullptr)
+    {
+        const QString className = historyClassEdit_->text().trimmed();
+        if (!className.isEmpty())
+        {
+            query.classLike = className.toStdString();
+        }
+    }
+
+    if (historyStartCheck_ != nullptr
+        && historyStartCheck_->isChecked()
+        && historyStartEdit_ != nullptr)
+    {
+        query.recordedAfterMs = historyStartEdit_->dateTime().toMSecsSinceEpoch();
+    }
+
+    if (historyEndCheck_ != nullptr
+        && historyEndCheck_->isChecked()
+        && historyEndEdit_ != nullptr)
+    {
+        query.recordedBeforeMs = historyEndEdit_->dateTime().toMSecsSinceEpoch();
+    }
+
+    if (historyLimitSpinBox_ != nullptr)
+    {
+        query.limit = static_cast<std::size_t>(historyLimitSpinBox_->value());
+    }
+
+    return query;
 }
 
 void MainWindow::resetDetectionSummary()
@@ -533,4 +896,28 @@ QString MainWindow::formatDuration(qint64 milliseconds) const
     return QStringLiteral("%1:%2")
         .arg(minutes, 2, 10, QLatin1Char('0'))
         .arg(seconds, 2, 10, QLatin1Char('0'));
+}
+
+QString MainWindow::formatSessionLabel(
+    const ivp::InspectionSessionSummary& session) const
+{
+    const QString startedAt = session.startedAtMs > 0
+        ? QDateTime::fromMSecsSinceEpoch(session.startedAtMs)
+              .toString(QStringLiteral("MM-dd HH:mm"))
+        : QStringLiteral("--");
+    QString source = QString::fromStdString(session.sourceId);
+    if (source.isEmpty())
+    {
+        source = QString::fromStdString(session.inputUrl);
+    }
+    if (source.size() > 34)
+    {
+        source = source.left(31) + QStringLiteral("...");
+    }
+
+    return QStringLiteral("#%1  %2  %3  %4 objects")
+        .arg(session.sessionId)
+        .arg(startedAt)
+        .arg(source.isEmpty() ? QStringLiteral("--") : source)
+        .arg(session.objectCount);
 }

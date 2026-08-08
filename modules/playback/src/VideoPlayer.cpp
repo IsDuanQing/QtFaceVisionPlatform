@@ -1,8 +1,10 @@
 #include "playback/VideoPlayer.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <memory>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -12,9 +14,34 @@
 
 #include "inference/IDetector.h"
 #include "inference/MockDetector.h"
+#include "inference/YoloTensorRTDetector.h"
 
 namespace
 {
+
+std::string environmentValue(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::string() : std::string(value);
+}
+
+int environmentInt(const char* name, int fallback)
+{
+    const std::string value = environmentValue(name);
+    if (value.empty())
+    {
+        return fallback;
+    }
+
+    try
+    {
+        return std::stoi(value);
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
 
 void releaseFrameReference(void* frame)
 {
@@ -725,6 +752,19 @@ void VideoPlayer::emitState()
 
 bool VideoPlayer::initializeDetector()
 {
+    const std::string backend = environmentValue("IVP_DETECTOR_BACKEND");
+    const bool useTensorRT =
+        backend == "tensorrt" || backend == "TensorRT" || backend == "TENSORRT";
+
+    if (useTensorRT)
+    {
+        detector_ = std::make_unique<ivp::YoloTensorRTDetector>();
+    }
+    else
+    {
+        detector_ = std::make_unique<ivp::MockDetector>();
+    }
+
     if (detector_ == nullptr)
     {
         setLastError(QStringLiteral("The inference detector is not available."));
@@ -732,14 +772,27 @@ bool VideoPlayer::initializeDetector()
     }
 
     ivp::DetectorConfig config;
+    config.backend = useTensorRT
+        ? ivp::DetectorBackend::TensorRT
+        : ivp::DetectorBackend::Mock;
     config.confidenceThreshold = 0.5F;
+    config.nmsThreshold = 0.45F;
     config.simulatedDelayMs = kMockInferenceDelayMs;
     // 模块 6 需要持续显示移动模拟框，因此先让 MockDetector 每帧产生结果。
     config.detectEveryNFrames = 1;
+    config.enginePath = environmentValue("IVP_YOLO_ENGINE");
+    config.labelsPath = environmentValue("IVP_YOLO_LABELS");
+    config.inputWidth = environmentInt("IVP_YOLO_INPUT_WIDTH", 640);
+    config.inputHeight = environmentInt("IVP_YOLO_INPUT_HEIGHT", 640);
+    config.classCount = environmentInt("IVP_YOLO_CLASS_COUNT", 0);
+    config.maxDetections = environmentInt("IVP_YOLO_MAX_DETECTIONS", 100);
 
     if (!detector_->initialize(config))
     {
-        setLastError(QStringLiteral("Could not initialize the inference detector."));
+        const std::string detectorError = detector_->lastError();
+        setLastError(detectorError.empty()
+            ? QStringLiteral("Could not initialize the inference detector.")
+            : QString::fromStdString(detectorError));
         return false;
     }
 

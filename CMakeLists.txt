@@ -10,6 +10,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
+enable_testing()
+
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Multimedia)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)

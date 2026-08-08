@@ -2,6 +2,8 @@ add_executable(IndustrialVisionViewer
     main.cpp
     MainWindow.cpp
     MainWindow.h
+    DetectionHistoryTableModel.cpp
+    DetectionHistoryTableModel.h
     VideoDisplayWidget.cpp
     VideoDisplayWidget.h
 )

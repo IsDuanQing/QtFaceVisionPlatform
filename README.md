@@ -38,6 +38,8 @@ IndustrialVisionPlatform/
 - `docs/module-6-detection-overlay.md`：检测结果回传与 UI 画框
 - `docs/module-7-result-management.md`：检测结果管理与统计
 - `docs/module-8-sqlite-storage.md`：SQLite 检测结果存储
+- `docs/module-9-history-query.md`：历史检测记录查询界面
+- `docs/module-10-yolo-tensorrt.md`：YOLO TensorRT 推理准备
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -421,3 +423,42 @@ VideoPlayer
 - 为什么一帧结果要放进同一个事务
 - 为什么要记录 session、frameIndex、ptsMs 和 sourceId
 - 为什么 SQLite 适合作为模块 8 的第一版存储后端
+
+## 模块 9 当前状态
+
+模块 9：历史检测记录查询界面。
+
+已完成第一版：
+- `SQLiteDetectionStorage` 新增会话摘要和历史记录查询接口
+- 支持按会话、sourceId、类别和记录时间筛选
+- 新增 `DetectionHistoryTableModel`
+- Qt 主窗口增加可拖动的历史记录查询面板
+- 增加最近会话下拉框、筛选条件、数量限制和历史记录表格
+
+学习重点：
+- SQLite 查询层为什么不能放进 Qt 控件
+- `QAbstractTableModel` 如何承载结构化历史数据
+- 为什么查询结果需要携带 session、frame 和检测框上下文
+- 为什么历史查询默认需要数量上限
+
+## 模块 10 当前状态
+
+模块 10：YOLO TensorRT 推理准备。
+
+已完成第一阶段：
+- `DetectorConfig` 增加 TensorRT/YOLO 所需模型配置。
+- 新增 `YoloPreprocessor`，完成 RGB24 到 letterbox/CHW float 输入。
+- 新增 `YoloPostprocessor`，完成常见 YOLO 输出解析、置信度过滤和 NMS。
+- 新增 `YoloTensorRTDetector` 作为 `IDetector` 的可替换实现。
+- `VideoPlayer` 支持通过环境变量选择 `MockDetector` 或 TensorRT 后端。
+- 新增前后处理单元测试。
+
+当前限制：
+- 尚未绑定真实 CUDA/TensorRT Engine。
+- 真实模型接入前需要确认 ONNX 输入输出形状、类别顺序和坐标格式。
+
+学习重点：
+- letterbox 缩放和检测框反算。
+- HWC 与 CHW 内存布局。
+- YOLO 输出格式、objectness、类别分数和 class-aware NMS。
+- TensorRT 资源生命周期与 GPU 异步执行。

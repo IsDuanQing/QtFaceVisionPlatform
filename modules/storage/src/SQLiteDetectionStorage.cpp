@@ -75,10 +75,54 @@ constexpr const char* kFrameResultsSql =
     "FROM detection_records "
     "WHERE session_id = ? AND frame_index = ? ORDER BY id ASC;";
 
+constexpr const char* kRecentSessionsSql = R"SQL(
+SELECT
+    s.id,
+    s.source_id,
+    s.input_url,
+    s.started_at_ms,
+    s.ended_at_ms,
+    COALESCE((
+        SELECT COUNT(*)
+        FROM detection_frames f
+        WHERE f.session_id = s.id
+    ), 0) AS frame_count,
+    COALESCE((
+        SELECT COUNT(*)
+        FROM detection_records r
+        WHERE r.session_id = s.id
+    ), 0) AS object_count
+FROM inspection_sessions s
+ORDER BY s.started_at_ms DESC, s.id DESC
+LIMIT ?;
+)SQL";
+
 std::string textColumn(sqlite3_stmt* statement, int column)
 {
     const unsigned char* text = sqlite3_column_text(statement, column);
     return text == nullptr ? std::string() : reinterpret_cast<const char*>(text);
+}
+
+std::optional<std::int64_t> optionalInt64Column(sqlite3_stmt* statement, int column)
+{
+    if (sqlite3_column_type(statement, column) == SQLITE_NULL)
+    {
+        return std::nullopt;
+    }
+
+    return sqlite3_column_int64(statement, column);
+}
+
+std::int64_t boundedLimit(std::size_t maxCount)
+{
+    return maxCount > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())
+        ? std::numeric_limits<std::int64_t>::max()
+        : static_cast<std::int64_t>(maxCount);
+}
+
+std::string likePattern(const std::string& text)
+{
+    return "%" + text + "%";
 }
 
 } // namespace
@@ -327,10 +371,7 @@ DetectionResults SQLiteDetectionStorage::recentResults(std::size_t maxCount) con
         return {};
     }
 
-    const std::int64_t limit = maxCount
-        > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())
-        ? std::numeric_limits<std::int64_t>::max()
-        : static_cast<std::int64_t>(maxCount);
+    const std::int64_t limit = boundedLimit(maxCount);
     return readResultsLocked(kRecentResultsSql, limit, 0, false);
 }
 
@@ -339,6 +380,228 @@ DetectionResults SQLiteDetectionStorage::resultsForFrame(
     std::int64_t frameIndex) const
 {
     return readResultsLocked(kFrameResultsSql, sessionId, frameIndex, true);
+}
+
+InspectionSessionSummaries SQLiteDetectionStorage::recentSessions(std::size_t maxCount) const
+{
+    if (maxCount == 0)
+    {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (database_ == nullptr)
+    {
+        lastError_ = "SQLite database is not open.";
+        return {};
+    }
+
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(database_, kRecentSessionsSql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        setLastErrorLocked("Could not prepare inspection session query");
+        return {};
+    }
+
+    if (sqlite3_bind_int64(statement, 1, boundedLimit(maxCount)) != SQLITE_OK)
+    {
+        setLastErrorLocked("Could not bind inspection session query");
+        sqlite3_finalize(statement);
+        return {};
+    }
+
+    InspectionSessionSummaries sessions;
+    int stepResult = SQLITE_ROW;
+    while ((stepResult = sqlite3_step(statement)) == SQLITE_ROW)
+    {
+        InspectionSessionSummary session;
+        session.sessionId = sqlite3_column_int64(statement, 0);
+        session.sourceId = textColumn(statement, 1);
+        session.inputUrl = textColumn(statement, 2);
+        session.startedAtMs = sqlite3_column_int64(statement, 3);
+        session.endedAtMs = optionalInt64Column(statement, 4);
+        session.frameCount = sqlite3_column_int64(statement, 5);
+        session.objectCount = sqlite3_column_int64(statement, 6);
+        sessions.push_back(std::move(session));
+    }
+
+    if (stepResult != SQLITE_DONE)
+    {
+        setLastErrorLocked("Could not read inspection sessions");
+        sessions.clear();
+    }
+    else
+    {
+        lastError_.clear();
+    }
+
+    sqlite3_finalize(statement);
+    return sessions;
+}
+
+DetectionHistoryRows SQLiteDetectionStorage::recentHistory(std::size_t maxCount) const
+{
+    DetectionHistoryQuery query;
+    query.limit = maxCount;
+    return queryHistory(query);
+}
+
+DetectionHistoryRows SQLiteDetectionStorage::queryHistory(
+    const DetectionHistoryQuery& query) const
+{
+    if (query.limit == 0)
+    {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (database_ == nullptr)
+    {
+        lastError_ = "SQLite database is not open.";
+        return {};
+    }
+
+    std::string sql = R"SQL(
+SELECT
+    r.id,
+    r.session_id,
+    r.source_id,
+    s.input_url,
+    s.started_at_ms,
+    s.ended_at_ms,
+    r.frame_index,
+    r.pts_ms,
+    r.recorded_at_ms,
+    COALESCE((
+        SELECT f.object_count
+        FROM detection_frames f
+        WHERE f.session_id = r.session_id AND f.frame_index = r.frame_index
+        ORDER BY f.id DESC
+        LIMIT 1
+    ), 0),
+    r.class_id,
+    r.class_name,
+    r.confidence,
+    r.box_x,
+    r.box_y,
+    r.box_width,
+    r.box_height
+FROM detection_records r
+INNER JOIN inspection_sessions s ON s.id = r.session_id
+WHERE 1 = 1
+)SQL";
+
+    if (query.sessionId.has_value())
+    {
+        sql += " AND r.session_id = ?";
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        sql += " AND (r.source_id LIKE ? COLLATE NOCASE"
+               " OR s.source_id LIKE ? COLLATE NOCASE"
+               " OR s.input_url LIKE ? COLLATE NOCASE)";
+    }
+    if (query.classLike.has_value() && !query.classLike->empty())
+    {
+        sql += " AND r.class_name LIKE ? COLLATE NOCASE";
+    }
+    if (query.recordedAfterMs.has_value())
+    {
+        sql += " AND r.recorded_at_ms >= ?";
+    }
+    if (query.recordedBeforeMs.has_value())
+    {
+        sql += " AND r.recorded_at_ms <= ?";
+    }
+    sql += " ORDER BY r.recorded_at_ms DESC, r.id DESC LIMIT ?;";
+
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(database_, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK)
+    {
+        setLastErrorLocked("Could not prepare detection history query");
+        return {};
+    }
+
+    int parameterIndex = 1;
+    bool bound = true;
+    auto bindInt64 = [&](std::int64_t value) {
+        bound = bound
+            && sqlite3_bind_int64(statement, parameterIndex++, value) == SQLITE_OK;
+    };
+    auto bindText = [&](const std::string& value) {
+        bound = bound
+            && sqlite3_bind_text(statement, parameterIndex++, value.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
+    };
+
+    if (query.sessionId.has_value())
+    {
+        bindInt64(*query.sessionId);
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        const std::string pattern = likePattern(*query.sourceLike);
+        bindText(pattern);
+        bindText(pattern);
+        bindText(pattern);
+    }
+    if (query.classLike.has_value() && !query.classLike->empty())
+    {
+        bindText(likePattern(*query.classLike));
+    }
+    if (query.recordedAfterMs.has_value())
+    {
+        bindInt64(*query.recordedAfterMs);
+    }
+    if (query.recordedBeforeMs.has_value())
+    {
+        bindInt64(*query.recordedBeforeMs);
+    }
+    bindInt64(boundedLimit(query.limit));
+
+    if (!bound)
+    {
+        setLastErrorLocked("Could not bind detection history query");
+        sqlite3_finalize(statement);
+        return {};
+    }
+
+    DetectionHistoryRows historyRows;
+    int stepResult = SQLITE_ROW;
+    while ((stepResult = sqlite3_step(statement)) == SQLITE_ROW)
+    {
+        DetectionHistoryRow row;
+        row.recordId = sqlite3_column_int64(statement, 0);
+        row.sessionId = sqlite3_column_int64(statement, 1);
+        row.sourceId = textColumn(statement, 2);
+        row.inputUrl = textColumn(statement, 3);
+        row.sessionStartedAtMs = sqlite3_column_int64(statement, 4);
+        row.sessionEndedAtMs = optionalInt64Column(statement, 5);
+        row.frameIndex = sqlite3_column_int64(statement, 6);
+        row.ptsMs = sqlite3_column_int64(statement, 7);
+        row.recordedAtMs = sqlite3_column_int64(statement, 8);
+        row.frameObjectCount = sqlite3_column_int64(statement, 9);
+        row.classId = sqlite3_column_int(statement, 10);
+        row.className = textColumn(statement, 11);
+        row.confidence = static_cast<float>(sqlite3_column_double(statement, 12));
+        row.box.x = static_cast<float>(sqlite3_column_double(statement, 13));
+        row.box.y = static_cast<float>(sqlite3_column_double(statement, 14));
+        row.box.width = static_cast<float>(sqlite3_column_double(statement, 15));
+        row.box.height = static_cast<float>(sqlite3_column_double(statement, 16));
+        historyRows.push_back(std::move(row));
+    }
+
+    if (stepResult != SQLITE_DONE)
+    {
+        setLastErrorLocked("Could not read detection history");
+        historyRows.clear();
+    }
+    else
+    {
+        lastError_.clear();
+    }
+
+    sqlite3_finalize(statement);
+    return historyRows;
 }
 
 bool SQLiteDetectionStorage::createSchemaLocked()

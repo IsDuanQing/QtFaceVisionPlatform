@@ -17,9 +17,13 @@ DEFINES += QT_DEPRECATED_WARNINGS
 SOURCES += \
         apps/viewer/main.cpp \
         apps/viewer/MainWindow.cpp \
+        apps/viewer/DetectionHistoryTableModel.cpp \
         apps/viewer/VideoDisplayWidget.cpp \
         modules/audio/src/AudioPlayer.cpp \
         modules/inference/src/MockDetector.cpp \
+        modules/inference/src/YoloPreprocessor.cpp \
+        modules/inference/src/YoloPostprocessor.cpp \
+        modules/inference/src/YoloTensorRTDetector.cpp \
         modules/pipeline/src/FrameDispatcher.cpp \
         modules/playback/src/VideoPlayer.cpp \
         modules/results/src/ResultManager.cpp \
@@ -34,6 +38,7 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 
 HEADERS += \
     apps/viewer/MainWindow.h \
+    apps/viewer/DetectionHistoryTableModel.h \
     apps/viewer/VideoDisplayWidget.h \
     modules/audio/include/audio/AudioPlayer.h \
     modules/common/include/common/BlockingQueue.h \
@@ -41,6 +46,9 @@ HEADERS += \
     modules/common/include/common/VideoFrame.h \
     modules/inference/include/inference/IDetector.h \
     modules/inference/include/inference/MockDetector.h \
+    modules/inference/include/inference/YoloPreprocessor.h \
+    modules/inference/include/inference/YoloPostprocessor.h \
+    modules/inference/include/inference/YoloTensorRTDetector.h \
     modules/pipeline/include/pipeline/FrameDispatcher.h \
     modules/playback/include/playback/VideoPlayer.h \
     modules/results/include/results/ResultManager.h \
