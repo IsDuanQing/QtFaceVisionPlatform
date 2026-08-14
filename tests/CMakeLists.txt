@@ -119,7 +119,7 @@ add_executable(ivp_detection_control_server_smoke_test
 target_link_libraries(ivp_detection_control_server_smoke_test
     PRIVATE
         ivp_control
-        Qt5::Network
+        ${IVP_QT_NETWORK}
 )
 
 add_test(

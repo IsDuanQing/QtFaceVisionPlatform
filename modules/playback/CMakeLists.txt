@@ -15,8 +15,8 @@ target_compile_definitions(ivp_playback
 
 target_link_libraries(ivp_playback
     PUBLIC
-        Qt5::Core
-        Qt5::Gui
+        ${IVP_QT_CORE}
+        ${IVP_QT_GUI}
         ivp_common
         ivp_pipeline
         ivp_audio

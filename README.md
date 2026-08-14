@@ -143,7 +143,7 @@ Qt 可视化客户端。
 - 从视频文件中打开音频流
 - 使用 FFmpeg 解码音频
 - 使用 `swresample` 转换为 PCM
-- 使用 Qt `QAudioOutput` 播放声音
+- 使用 Qt6 `QAudioSink` 播放声音
 - 提供音频播放时钟，辅助音画同步
 
 说明：
@@ -205,7 +205,7 @@ AI 推理模块。
 
 说明：
 - 默认 Qt demo 仍使用 `MockDetector`
-- 定义 `IVP_ENABLE_OPENCV_DNN` 后才编译 OpenCV DNN 真实 ONNX 推理代码
+- MSYS2 MinGW/UCRT64 检测到 OpenCV 4/5 后会自动启用 OpenCV DNN；其他工具链可通过 `IVP_ENABLE_OPENCV_DNN` 显式启用
 - 定义 `IVP_ENABLE_TENSORRT` 后才编译真实 TensorRT 执行代码
 - 当前 YOLO 输入约定为 `images [1, 3, 1088, 1088]`
 - 当前 YOLO 输出约定为 `output0 [1, 24, 24276]`
@@ -328,7 +328,7 @@ VideoPlayer
   |-----------------> AudioPlayer
                           |
                           v
-                    AudioFrame -> PCM -> QAudioOutput
+                    AudioFrame -> PCM -> QAudioSink
 ```
 
 ## 模块 1 当前状态
@@ -659,8 +659,8 @@ VideoPlayer
 - OpenCV DNN 后端复用已有 `YoloPreprocessor` 和 `YoloPostprocessor`。
 - Qt 后端选择框新增 `OpenCV DNN`。
 - 远程任务协议支持 `detector_backend=opencv_dnn`。
-- qmake 和 CMake 都支持可选启用 `IVP_ENABLE_OPENCV_DNN`。
-- 默认未启用 OpenCV DNN 时，会返回清晰错误，不影响 Mock demo 编译运行。
+- qmake 在 MSYS2 MinGW/UCRT64 下会自动检测并启用 OpenCV DNN，CMake 仍通过 `IVP_ENABLE_OPENCV_DNN` 选项控制。
+- 未检测到或未显式启用 OpenCV DNN 时，会返回清晰错误，不影响 Mock demo 编译运行。
 
 当前限制：
 - OpenCV DNN 后端默认使用 CPU。

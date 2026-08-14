@@ -3,8 +3,15 @@
 #include <algorithm>
 #include <cerrno>
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QAudio>
+#include <QAudioDevice>
+#include <QAudioSink>
+#include <QMediaDevices>
+#else
 #include <QAudioDeviceInfo>
 #include <QAudioOutput>
+#endif
 #include <QDebug>
 #include <QFileInfo>
 #include <QIODevice>
@@ -200,7 +207,11 @@ bool AudioPlayer::openInput(const QString& filename)
 
 bool AudioPlayer::configureAudioOutput()
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    const QAudioDevice device = QMediaDevices::defaultAudioOutput();
+#else
     const QAudioDeviceInfo device = QAudioDeviceInfo::defaultOutputDevice();
+#endif
     if (device.isNull())
     {
         lastError_ = QStringLiteral("No default audio output device is available.");
@@ -208,6 +219,15 @@ bool AudioPlayer::configureAudioOutput()
     }
 
     QAudioFormat requestedFormat;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    requestedFormat.setSampleRate(codecCtx_->sample_rate > 0 ? codecCtx_->sample_rate : 48000);
+    requestedFormat.setChannelCount(2);
+    requestedFormat.setSampleFormat(QAudioFormat::Int16);
+
+    outputFormat_ = device.isFormatSupported(requestedFormat)
+        ? requestedFormat
+        : device.preferredFormat();
+#else
     requestedFormat.setCodec(QStringLiteral("audio/pcm"));
     requestedFormat.setSampleRate(codecCtx_->sample_rate > 0 ? codecCtx_->sample_rate : 48000);
     requestedFormat.setChannelCount(2);
@@ -218,6 +238,7 @@ bool AudioPlayer::configureAudioOutput()
     outputFormat_ = device.isFormatSupported(requestedFormat)
         ? requestedFormat
         : device.nearestFormat(requestedFormat);
+#endif
 
     if (!outputFormat_.isValid())
     {
@@ -226,8 +247,12 @@ bool AudioPlayer::configureAudioOutput()
     }
 
     // The current converter outputs packed signed 16-bit PCM.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    if (outputFormat_.sampleFormat() != QAudioFormat::Int16)
+#else
     if (outputFormat_.sampleType() != QAudioFormat::SignedInt
         || outputFormat_.sampleSize() != 16)
+#endif
     {
         lastError_ = QStringLiteral("The audio device does not accept signed 16-bit PCM.");
         return false;
@@ -289,9 +314,15 @@ bool AudioPlayer::configureAudioOutput()
         return false;
     }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    audioOutput_ = new QAudioSink(device, outputFormat_, this);
+#else
     audioOutput_ = new QAudioOutput(device, outputFormat_, this);
+#endif
     audioOutput_->setVolume(1.0);
-    audioOutput_->setBufferSize(std::max(8192, outputFormat_.bytesForDuration(200000)));
+    const int startupBufferBytes =
+        static_cast<int>(outputFormat_.bytesForDuration(200000));
+    audioOutput_->setBufferSize(std::max(8192, startupBufferBytes));
     return true;
 }
 
@@ -306,7 +337,11 @@ void AudioPlayer::play()
     {
         audioDevice_ = audioOutput_->start();
     }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    else if (audioOutput_->state() == QtAudio::SuspendedState)
+#else
     else if (audioOutput_->state() == QAudio::SuspendedState)
+#endif
     {
         audioOutput_->resume();
     }
@@ -518,7 +553,8 @@ void AudioPlayer::pumpAudio()
         return;
     }
 
-    const int targetBytes = std::max(8192, outputFormat_.bytesForDuration(100000));
+    const int targetBytes =
+        std::max(8192, static_cast<int>(outputFormat_.bytesForDuration(100000)));
     while (pendingPcm_.size() < targetBytes)
     {
         if (!decodeNextFrame())
@@ -533,9 +569,18 @@ void AudioPlayer::pumpAudio()
         }
     }
 
-    while (!pendingPcm_.isEmpty() && audioOutput_->bytesFree() > 0)
+    while (!pendingPcm_.isEmpty())
     {
-        const int bytesToWrite = std::min(audioOutput_->bytesFree(), pendingPcm_.size());
+        const qint64 freeBytes =
+            static_cast<qint64>(audioOutput_->bytesFree());
+        if (freeBytes <= 0)
+        {
+            break;
+        }
+
+        const qint64 bytesToWrite = std::min<qint64>(
+            freeBytes,
+            static_cast<qint64>(pendingPcm_.size()));
         const qint64 written = audioDevice_->write(pendingPcm_.constData(), bytesToWrite);
         if (written <= 0)
         {

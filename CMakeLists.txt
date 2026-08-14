@@ -12,7 +12,14 @@ set(CMAKE_AUTORCC ON)
 
 enable_testing()
 
-find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Multimedia Network)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets Multimedia Network)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets Multimedia Network)
+
+set(IVP_QT_CORE Qt${QT_VERSION_MAJOR}::Core)
+set(IVP_QT_GUI Qt${QT_VERSION_MAJOR}::Gui)
+set(IVP_QT_WIDGETS Qt${QT_VERSION_MAJOR}::Widgets)
+set(IVP_QT_MULTIMEDIA Qt${QT_VERSION_MAJOR}::Multimedia)
+set(IVP_QT_NETWORK Qt${QT_VERSION_MAJOR}::Network)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 

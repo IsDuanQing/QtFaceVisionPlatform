@@ -12,7 +12,7 @@ target_include_directories(ivp_network
 
 target_link_libraries(ivp_network
     PUBLIC
-        Qt5::Core
-        Qt5::Network
+        ${IVP_QT_CORE}
+        ${IVP_QT_NETWORK}
         ivp_common
 )

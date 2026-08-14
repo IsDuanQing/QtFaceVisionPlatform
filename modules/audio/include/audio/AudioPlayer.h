@@ -12,8 +12,16 @@ extern "C"
 #include <QByteArray>
 #include <QObject>
 #include <QTimer>
+#include <QtGlobal>
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+class QAudioSink;
+using AudioOutputDevice = QAudioSink;
+#else
 class QAudioOutput;
+using AudioOutputDevice = QAudioOutput;
+#endif
+
 class QIODevice;
 
 // Decodes the audio stream and feeds standard PCM samples to Qt audio output.
@@ -63,7 +71,7 @@ private:
     AVFrame* frame_;
     int audioStreamIndex_;
 
-    QAudioOutput* audioOutput_;
+    AudioOutputDevice* audioOutput_;
     QIODevice* audioDevice_;
     QAudioFormat outputFormat_;
     QTimer pumpTimer_;

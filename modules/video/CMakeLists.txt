@@ -15,8 +15,8 @@ target_include_directories(ivp_video
 
 target_link_libraries(ivp_video
     PUBLIC
-        Qt5::Core
-        Qt5::Gui
+        ${IVP_QT_CORE}
+        ${IVP_QT_GUI}
         ivp_common
         PkgConfig::FFMPEG
 )

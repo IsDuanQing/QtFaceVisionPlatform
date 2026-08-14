@@ -100,7 +100,12 @@ win32-msvc* {
         }
     }
 
-    INCLUDEPATH += $$MSYS2_PREFIX/include
+    # UCRT64 GCC already searches its own sysroot include directory.
+    # Adding C:/msys64/ucrt64/include through qmake turns it into -isystem and
+    # can break GCC's include_next lookup for standard headers such as stdlib.h.
+    !contains(MSYS2_PREFIX, .*ucrt64.*) {
+        INCLUDEPATH += $$MSYS2_PREFIX/include
+    }
     LIBS += -L$$MSYS2_PREFIX/lib
     LIBS += \
         -lavformat \
@@ -138,6 +143,18 @@ INCLUDEPATH += $$PWD/modules/video/include
 #     "MSYS2_PREFIX=C:/msys64/ucrt64"
 # 如果你的 OpenCV 库名不是下面这些，可以额外传入：
 #   "OPENCV_LIBS=-lopencv_dnn -lopencv_imgproc -lopencv_core"
+#
+# The MSYS2/UCRT64 kit already provides OpenCV 5 in the standard prefix.
+# Enable the real ONNX/YOLO backend automatically when its DNN header exists.
+# Other kits can still opt in explicitly with DEFINES+=IVP_ENABLE_OPENCV_DNN.
+win32-g++ {
+    exists($$MSYS2_PREFIX/include/opencv5/opencv2/dnn.hpp) {
+        DEFINES *= IVP_ENABLE_OPENCV_DNN
+    } else:exists($$MSYS2_PREFIX/include/opencv4/opencv2/dnn.hpp) {
+        DEFINES *= IVP_ENABLE_OPENCV_DNN
+    }
+}
+
 contains(DEFINES, IVP_ENABLE_OPENCV_DNN) {
     isEmpty(MSYS2_PREFIX): MSYS2_PREFIX = C:/msys64/ucrt64
     isEmpty(OPENCV_INCLUDE_DIR) {

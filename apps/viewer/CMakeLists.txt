@@ -12,7 +12,7 @@ add_executable(IndustrialVisionViewer
 
 target_link_libraries(IndustrialVisionViewer
     PRIVATE
-        Qt5::Widgets
+        ${IVP_QT_WIDGETS}
         ivp_results
         ivp_storage
         ivp_playback

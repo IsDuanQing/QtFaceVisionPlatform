@@ -102,11 +102,19 @@ DetectionResultDelivery::DetectionResultDelivery(QObject* parent)
         &QTcpSocket::bytesWritten,
         this,
         &DetectionResultDelivery::flushNetworkQueue);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     connect(
         socket_,
         &QAbstractSocket::errorOccurred,
         this,
         &DetectionResultDelivery::handleSocketError);
+#else
+    connect(
+        socket_,
+        QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error),
+        this,
+        &DetectionResultDelivery::handleSocketError);
+#endif
 }
 
 DetectionResultDelivery::~DetectionResultDelivery()

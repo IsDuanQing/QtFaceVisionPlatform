@@ -10,7 +10,7 @@ target_include_directories(ivp_audio
 
 target_link_libraries(ivp_audio
     PUBLIC
-        Qt5::Core
-        Qt5::Multimedia
+        ${IVP_QT_CORE}
+        ${IVP_QT_MULTIMEDIA}
         PkgConfig::FFMPEG
 )
