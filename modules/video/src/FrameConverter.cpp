@@ -14,9 +14,10 @@ FrameConverter::FrameConverter()
 
 FrameConverter::~FrameConverter()
 {
-    sws_freeContext(swsCtx_);
+    sws_freeContext(swsCtx_); // 安全释放图像转换上下文
 }
 
+// 将FFmepg解码后的YUV数据帧转换为自己封装好的RGB24视频帧
 bool FrameConverter::convert(
     const AVFrame& sourceFrame,
     const ivp::VideoFrameMetadata& metadata,
@@ -29,6 +30,7 @@ bool FrameConverter::convert(
     }
 
     const AVPixelFormat sourceFormat = static_cast<AVPixelFormat>(sourceFrame.format);
+    // 只有当原始原始数据帧发生改变的时候，才重建上下文，避免频繁的销毁创建带来的性能开销。
     if (swsCtx_ == nullptr || width_ != sourceFrame.width || height_ != sourceFrame.height
         || pixelFormat_ != sourceFormat)
     {

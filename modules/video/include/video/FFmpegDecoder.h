@@ -39,27 +39,27 @@ public:
     double frameRate() const;
     int width() const;
     int height() const;
-    qint64 timestampToMilliseconds(int64_t timestamp) const;
+    qint64 timestampToMilliseconds(int64_t timestamp) const; // 将媒体时间戳（PTS/DTS）换算为绝对毫秒值。
 
 private:
-    qint64 estimatedFrameIntervalMs() const;
+    qint64 estimatedFrameIntervalMs() const; // 计算单帧间隔时间
     static int interruptCallback(void* opaque);
 
-    AVFormatContext* formatCtx_;
-    AVCodecContext* codecCtx_;
-    AVPacket* packet_;
-    AVFrame* decodedFrame_;
-    FrameConverter converter_;
-    int videoStreamIndex_;
-    AVRational timeBase_;
-    qint64 durationMs_;
-    qint64 frameIndex_;
-    double frameRate_;
-    bool inputFinished_;
-    bool flushSent_;
-    QString lastError_;
-    QString sourceId_;
-    std::atomic<bool> interruptRequested_;
+    AVFormatContext* formatCtx_; // 视频流上下文
+    AVCodecContext* codecCtx_; // 解码器上下文
+    AVPacket* packet_; // 压缩数据包（H264/H265）
+    AVFrame* decodedFrame_; // 解码之后的原始YUV像素帧
+    FrameConverter converter_; // YUV转RGB格式转换器
+    int videoStreamIndex_; // 视频流索引号，一个文件可能包含多条流（视频流、音频流、字幕流）
+    AVRational timeBase_; // 用于将pts时间戳换算为毫秒
+    qint64 durationMs_; // 视频总时长
+    qint64 frameIndex_; // 当前帧序号（解码进度计数）
+    double frameRate_; // fps
+    bool inputFinished_; // 文件输入是否读取完毕
+    bool flushSent_; // 是否已发送 flush packet（通知解码器排空缓冲区内剩余帧）
+    QString lastError_; // 最后一次错误信息
+    QString sourceId_; // 视频源的标识ID（多路视频时区分来源）
+    std::atomic<bool> interruptRequested_; // 线程安全的中断标志，用于外部请求终止解码线程
 };
 
 #endif // FFMPEGDECODER_H

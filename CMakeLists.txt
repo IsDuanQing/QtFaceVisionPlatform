@@ -12,7 +12,7 @@ set(CMAKE_AUTORCC ON)
 
 enable_testing()
 
-find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Multimedia)
+find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Multimedia Network)
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 
@@ -33,6 +33,7 @@ add_subdirectory(modules/inference)
 add_subdirectory(modules/results)
 add_subdirectory(modules/playback)
 add_subdirectory(modules/network)
+add_subdirectory(modules/control)
 add_subdirectory(modules/storage)
 
 add_subdirectory(apps/viewer)

@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "common/VideoFrame.h"
 #include "inference/YoloPostprocessor.h"
@@ -46,6 +47,38 @@ int main()
     assert(results.front().frameIndex == 12);
     assert(results.front().box.y >= 0.0F);
     assert(results.front().box.y < frame.metadata.height);
+
+    ivp::YoloPostprocessorConfig yolo11Config;
+    yolo11Config.classCount = 20;
+    yolo11Config.confidenceThreshold = 0.5F;
+    yolo11Config.nmsThreshold = 0.5F;
+    yolo11Config.classNames.resize(20);
+    for (int classId = 0; classId < 20; ++classId)
+    {
+        yolo11Config.classNames[static_cast<std::size_t>(classId)] =
+            "class_" + std::to_string(classId);
+    }
+
+    ivp::YoloPostprocessor yolo11Postprocessor(yolo11Config);
+    ivp::YoloTensorOutput yolo11Output;
+    yolo11Output.shape = {1, 24, 2};
+    yolo11Output.values.assign(24U * 2U, 0.0F);
+    const auto setValue = [&yolo11Output](int attribute, int candidate, float value) {
+        yolo11Output.values[
+            static_cast<std::size_t>(attribute) * 2U
+                + static_cast<std::size_t>(candidate)] = value;
+    };
+
+    setValue(0, 0, 320.0F);
+    setValue(1, 0, 320.0F);
+    setValue(2, 0, 160.0F);
+    setValue(3, 0, 120.0F);
+    setValue(4 + 7, 0, 0.92F);
+
+    const ivp::DetectionResults yolo11Results =
+        yolo11Postprocessor.process(yolo11Output, frame.metadata, preprocessed.transform);
+    assert(yolo11Results.size() == 1U);
+    assert(yolo11Results.front().classId == 7);
 
     return 0;
 }

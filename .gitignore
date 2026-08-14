@@ -1,0 +1,24 @@
+# Qt Creator local user settings
+*.pro.user
+*.pro.user.*
+
+# Build output
+build/
+build-*/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+
+# Local model binaries are large and environment-specific.
+models/**/*.onnx
+models/**/*.engine
+models/**/*.plan
+models/**/*.trt
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal

@@ -9,23 +9,51 @@
 #include <utility>
 
 #include <QDebug>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QMetaType>
 #include <QMetaObject>
+#include <QStringList>
 
 #include "inference/IDetector.h"
 #include "inference/MockDetector.h"
+#include "inference/YoloOpenCVDnnDetector.h"
 #include "inference/YoloTensorRTDetector.h"
 
 namespace
 {
 
-std::string environmentValue(const char* name)
+QStringList candidateProjectRoots()
+{
+    QStringList bases;
+#if defined(IVP_PROJECT_ROOT)
+    bases << QString::fromUtf8(IVP_PROJECT_ROOT);
+#endif
+    bases << QDir::currentPath();
+    bases << QCoreApplication::applicationDirPath();
+
+    QDir currentDirectory(QDir::currentPath());
+    QDir applicationDirectory(QCoreApplication::applicationDirPath());
+    for (int depth = 0; depth < 4; ++depth)
+    {
+        currentDirectory.cdUp();
+        applicationDirectory.cdUp();
+        bases << currentDirectory.absolutePath();
+        bases << applicationDirectory.absolutePath();
+    }
+
+    bases.removeDuplicates();
+    return bases;
+}
+
+std::string environmentValue(const char* name) // 读取字符串环境超参
 {
     const char* value = std::getenv(name);
     return value == nullptr ? std::string() : std::string(value);
 }
 
-int environmentInt(const char* name, int fallback)
+int environmentInt(const char* name, int fallback) // 读取整型环境变量
 {
     const std::string value = environmentValue(name);
     if (value.empty())
@@ -43,6 +71,118 @@ int environmentInt(const char* name, int fallback)
     }
 }
 
+float environmentFloat(const char* name, float fallback) // 读取浮点型环境变量
+{
+    const std::string value = environmentValue(name);
+    if (value.empty())
+    {
+        return fallback;
+    }
+
+    try
+    {
+        return std::stof(value);
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+// 模型自动检索，查找yolo配置文件
+QString defaultYoloModelPath(const QString& filename)
+{
+    const QString relativePath =
+        QDir(QStringLiteral("models/yolo11l")).filePath(filename);
+
+    for (const QString& base : candidateProjectRoots())
+    {
+        const QFileInfo marker(
+            QDir(base).filePath(QStringLiteral("models/yolo11l/labels.txt")));
+        if (marker.exists())
+        {
+            return QFileInfo(QDir(base).filePath(relativePath)).absoluteFilePath();
+        }
+    }
+
+    return QFileInfo(relativePath).absoluteFilePath();
+}
+
+// 路径解析
+QString resolveConfiguredPath(const char* environmentName, const QString& fallback)
+{
+    const std::string configuredValue = environmentValue(environmentName);
+    const QString configuredPath = configuredValue.empty()
+        ? fallback
+        : QString::fromStdString(configuredValue);
+    if (configuredPath.isEmpty())
+    {
+        return {};
+    }
+
+    const QFileInfo configuredInfo(configuredPath);
+    if (configuredInfo.isAbsolute() || configuredInfo.exists())
+    {
+        return configuredInfo.absoluteFilePath();
+    }
+
+    for (const QString& base : candidateProjectRoots())
+    {
+        const QFileInfo candidate(QDir(base).filePath(configuredPath));
+        if (candidate.exists())
+        {
+            return candidate.absoluteFilePath();
+        }
+    }
+
+    return QFileInfo(configuredPath).absoluteFilePath();
+}
+
+// 初始化检测配置
+ivp::DetectorConfig defaultDetectorConfig()
+{
+    const std::string backend = environmentValue("IVP_DETECTOR_BACKEND");
+    const bool useTensorRT =
+        backend == "tensorrt" || backend == "TensorRT" || backend == "TENSORRT";
+    const bool useOpenCVDnn =
+        backend == "opencv" || backend == "opencv_dnn"
+        || backend == "opencvdnn" || backend == "OpenCVDnn"
+        || backend == "OPENCV_DNN";
+
+    ivp::DetectorConfig config;
+    if (useTensorRT)
+    {
+        config.backend = ivp::DetectorBackend::TensorRT;
+    }
+    else if (useOpenCVDnn)
+    {
+        config.backend = ivp::DetectorBackend::OpenCVDnn;
+    }
+    else
+    {
+        config.backend = ivp::DetectorBackend::Mock;
+    }
+    config.confidenceThreshold = environmentFloat("IVP_YOLO_CONFIDENCE", 0.5F);
+    config.nmsThreshold = environmentFloat("IVP_YOLO_NMS", 0.45F);
+    config.simulatedDelayMs = 8;
+    config.detectEveryNFrames = 1;
+    config.onnxPath = resolveConfiguredPath(
+        "IVP_YOLO_ONNX",
+        defaultYoloModelPath(QStringLiteral("defect.onnx"))).toStdString();
+    config.enginePath = resolveConfiguredPath(
+        "IVP_YOLO_ENGINE",
+        defaultYoloModelPath(QStringLiteral("defect.engine"))).toStdString();
+    config.labelsPath = resolveConfiguredPath(
+        "IVP_YOLO_LABELS",
+        defaultYoloModelPath(QStringLiteral("labels.txt"))).toStdString();
+    config.inputWidth = environmentInt("IVP_YOLO_INPUT_WIDTH", 1088);
+    config.inputHeight = environmentInt("IVP_YOLO_INPUT_HEIGHT", 1088);
+    config.classCount = environmentInt("IVP_YOLO_CLASS_COUNT", 0);
+    config.maxDetections = environmentInt("IVP_YOLO_MAX_DETECTIONS", 100);
+    return config;
+}
+
+// 自定义析构回调
 void releaseFrameReference(void* frame)
 {
     delete static_cast<ivp::VideoFramePtr*>(frame);
@@ -50,11 +190,14 @@ void releaseFrameReference(void* frame)
 
 } // namespace
 
+
 VideoPlayer::VideoPlayer(QObject* parent)
     : QObject(parent),
       decoder_(),
+      imageSequenceReader_(),
       audioPlayer_(),
       detector_(std::make_unique<ivp::MockDetector>()),
+      detectorConfig_(defaultDetectorConfig()),
       frameDispatcher_(kFrameQueueCapacity, kInferenceQueueCapacity),
       pendingFrame_(),
       frameTimer_(),
@@ -62,6 +205,7 @@ VideoPlayer::VideoPlayer(QObject* parent)
       producerThread_(),
       inferenceThread_(),
       errorMutex_(),
+      detectorMutex_(),
       fileName_(),
       lastError_(),
       producerError_(),
@@ -104,36 +248,86 @@ VideoPlayer::~VideoPlayer()
     audioPlayer_.stop();
     audioPlayer_.close();
     decoder_.close();
+    imageSequenceReader_.close();
 }
 
+// 打开本地视频
 bool VideoPlayer::open(const QString& filename)
 {
     return openInput(VideoInputConfig::fromFile(filename));
 }
 
+// 打开RTSP摄像头流
 bool VideoPlayer::openRtsp(const QString& rtspUrl)
 {
     return openInput(VideoInputConfig::fromRtsp(rtspUrl));
+}
+
+// 打开图片序列文件夹
+bool VideoPlayer::openImageSequence(const QString& directoryPath, double fps)
+{
+    return openInput(VideoInputConfig::fromImageSequence(directoryPath, fps));
+}
+
+void VideoPlayer::setDetectorConfig(const ivp::DetectorConfig& config)
+{
+    detectorConfig_ = config;
+}
+
+bool VideoPlayer::applyDetectorConfig(const ivp::DetectorConfig& config)
+{
+    const ivp::DetectorConfig previousConfig = detectorConfig_;
+    detectorConfig_ = config;
+    clearLastError();
+
+    std::lock_guard<std::mutex> lock(detectorMutex_);
+    if (!initializeDetector())
+    {
+        detectorConfig_ = previousConfig;
+        return false;
+    }
+
+    return true;
+}
+
+ivp::DetectorConfig VideoPlayer::detectorConfig() const
+{
+    return detectorConfig_;
 }
 
 bool VideoPlayer::openInput(const VideoInputConfig& config)
 {
     stop();
     audioPlayer_.close();
+    closeActiveInput();
     resetSyncState();
     clearLastError();
     clearProducerError();
     hasAudio_ = false;
 
-    if (!decoder_.open(config))
+    bool inputOpened = false;
+    if (config.sourceType == VideoSourceType::ImageSequence)
     {
+        inputOpened = imageSequenceReader_.open(config);
+    }
+    else
+    {
+        inputOpened = decoder_.open(config);
+    }
+
+    if (!inputOpened)
+    {
+        const QString inputError = config.sourceType == VideoSourceType::ImageSequence
+            ? imageSequenceReader_.lastError()
+            : decoder_.lastError();
+        closeActiveInput();
         opened_ = false;
         fileName_.clear();
         sourceType_ = VideoSourceType::File;
         emitState();
         emit audioInfoChanged(false, 0, 0);
-        setLastError(decoder_.lastError());
-        emit errorOccurred(decoder_.lastError());
+        setLastError(inputError);
+        emit errorOccurred(inputError);
         return false;
     }
 
@@ -156,7 +350,7 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
     }
     else
     {
-        // Industrial RTSP preview is video-first; audio stays disabled for now.
+        // RTSP and image sequence inputs are video-first in this demo stage.
         emit audioInfoChanged(false, 0, 0);
     }
 
@@ -172,7 +366,7 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
         hasAudio_ = false;
         audioPlayer_.stop();
         audioPlayer_.close();
-        decoder_.close();
+        closeActiveInput();
         emit audioInfoChanged(false, 0, 0);
         emit errorOccurred(currentLastError());
         emitState();
@@ -187,7 +381,7 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
         hasAudio_ = false;
         audioPlayer_.stop();
         audioPlayer_.close();
-        decoder_.close();
+        closeActiveInput();
         emit audioInfoChanged(false, 0, 0);
         emit errorOccurred(currentLastError());
         emitState();
@@ -195,14 +389,15 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
     }
 
     emit videoInfoChanged(
-        decoder_.width(),
-        decoder_.height(),
-        decoder_.frameRate(),
-        decoder_.durationMs());
+        activeInputWidth(),
+        activeInputHeight(),
+        activeInputFrameRate(),
+        activeInputDurationMs());
     emitState();
     return true;
 }
 
+// 播放
 void VideoPlayer::play()
 {
     if (!opened_ || playing_)
@@ -226,6 +421,7 @@ void VideoPlayer::play()
     emitState();
 }
 
+// 暂停
 void VideoPlayer::pause()
 {
     if (!playing_)
@@ -243,6 +439,7 @@ void VideoPlayer::pause()
     emitState();
 }
 
+// 停止
 void VideoPlayer::stop()
 {
     frameTimer_.stop();
@@ -255,13 +452,14 @@ void VideoPlayer::stop()
     if (opened_)
     {
         stopProducerThread();
-        if (sourceType_ == VideoSourceType::File)
+        if (sourceType_ == VideoSourceType::File
+            || sourceType_ == VideoSourceType::ImageSequence)
         {
-            decoder_.seekToStart();
+            seekActiveInputToStart();
         }
         else
         {
-            decoder_.close();
+            closeActiveInput();
             opened_ = false;
             fileName_.clear();
             sourceType_ = VideoSourceType::File;
@@ -297,6 +495,7 @@ QString VideoPlayer::lastError() const
     return currentLastError();
 }
 
+// 定时器定时触发
 void VideoPlayer::consumeNextFrame()
 {
     frameTimer_.stop();
@@ -319,6 +518,7 @@ void VideoPlayer::consumeNextFrame()
 
     consumeFileFrame();
 }
+
 
 void VideoPlayer::consumeFileFrame()
 {
@@ -415,7 +615,7 @@ void VideoPlayer::consumeRtspFrame()
 
 int VideoPlayer::playbackIntervalMs() const
 {
-    const double fps = decoder_.frameRate();
+    const double fps = activeInputFrameRate();
     if (fps <= 0.0)
     {
         return 33;
@@ -471,6 +671,70 @@ QImage VideoPlayer::convertFrameToImage(ivp::VideoFramePtr frame) const
         QImage::Format_RGB888,
         releaseFrameReference,
         frameReference);
+}
+
+bool VideoPlayer::readNextInputFrame(ivp::VideoFrame* frame)
+{
+    if (sourceType_ == VideoSourceType::ImageSequence)
+    {
+        return imageSequenceReader_.readFrame(frame);
+    }
+
+    return decoder_.readFrame(frame);
+}
+
+QString VideoPlayer::activeInputLastError() const
+{
+    if (sourceType_ == VideoSourceType::ImageSequence)
+    {
+        return imageSequenceReader_.lastError();
+    }
+
+    return decoder_.lastError();
+}
+
+bool VideoPlayer::seekActiveInputToStart()
+{
+    if (sourceType_ == VideoSourceType::ImageSequence)
+    {
+        return imageSequenceReader_.seekToStart();
+    }
+
+    return decoder_.seekToStart();
+}
+
+void VideoPlayer::closeActiveInput()
+{
+    decoder_.close();
+    imageSequenceReader_.close();
+}
+
+int VideoPlayer::activeInputWidth() const
+{
+    return sourceType_ == VideoSourceType::ImageSequence
+        ? imageSequenceReader_.width()
+        : decoder_.width();
+}
+
+int VideoPlayer::activeInputHeight() const
+{
+    return sourceType_ == VideoSourceType::ImageSequence
+        ? imageSequenceReader_.height()
+        : decoder_.height();
+}
+
+double VideoPlayer::activeInputFrameRate() const
+{
+    return sourceType_ == VideoSourceType::ImageSequence
+        ? imageSequenceReader_.frameRate()
+        : decoder_.frameRate();
+}
+
+qint64 VideoPlayer::activeInputDurationMs() const
+{
+    return sourceType_ == VideoSourceType::ImageSequence
+        ? imageSequenceReader_.durationMs()
+        : decoder_.durationMs();
 }
 
 bool VideoPlayer::startProducerThread()
@@ -539,7 +803,7 @@ void VideoPlayer::producerLoop()
     while (!producerStopRequested_.load())
     {
         ivp::VideoFrame frame;
-        if (decoder_.readFrame(&frame))
+        if (readNextInputFrame(&frame))
         {
             const ivp::FrameQueuePolicy displayPolicy = sourceType_ == VideoSourceType::Rtsp
                 ? ivp::FrameQueuePolicy::DropOldest
@@ -562,13 +826,13 @@ void VideoPlayer::producerLoop()
             break;
         }
 
-        const QString decoderMessage = decoder_.lastError();
-        if (decoderMessage.isEmpty())
+        const QString inputMessage = activeInputLastError();
+        if (inputMessage.isEmpty())
         {
             break;
         }
 
-        setProducerError(decoderMessage);
+        setProducerError(inputMessage);
         QMetaObject::invokeMethod(
             this,
             [this]() { handleProducerFinished(); },
@@ -604,14 +868,37 @@ void VideoPlayer::inferenceLoop()
             continue;
         }
 
-        ivp::DetectionResults results = detector_->detect(*frame);
         const qint64 frameIndex = frame->metadata.frameIndex;
         const qint64 ptsMs = frame->metadata.ptsMs;
         const QString sourceId = QString::fromStdString(frame->metadata.sourceId);
+        ivp::DetectionResults results;
+        std::string detectorError;
+        std::string detectorName;
+        {
+            std::lock_guard<std::mutex> lock(detectorMutex_);
+            if (detector_ == nullptr)
+            {
+                break;
+            }
+            results = detector_->detect(*frame);
+            detectorError = detector_->lastError();
+            detectorName = detector_->name();
+        }
+        if (!detectorError.empty())
+        {
+            setProducerError(QStringLiteral("Inference failed: %1")
+                                 .arg(QString::fromStdString(detectorError)));
+            QMetaObject::invokeMethod(
+                this,
+                [this]() { handleProducerFinished(); },
+                Qt::QueuedConnection);
+            break;
+        }
+
         ++consumedFrames;
         detectedObjects += static_cast<qint64>(results.size());
 
-        // 推理线程不直接操作 UI，把结果投递回 VideoPlayer 所在线程。
+        // The inference thread never touches UI objects directly.
         QMetaObject::invokeMethod(
             this,
             [this, results = std::move(results), frameIndex, ptsMs, sourceId]() {
@@ -623,7 +910,7 @@ void VideoPlayer::inferenceLoop()
         {
             const double elapsedSeconds =
                 std::max<qint64>(1, elapsedTimer.elapsed()) / 1000.0;
-            qDebug() << QString::fromStdString(detector_->name())
+            qDebug() << QString::fromStdString(detectorName)
                      << "consumed frames:" << consumedFrames
                      << "fps:" << consumedFrames / elapsedSeconds
                      << "detections:" << detectedObjects
@@ -651,7 +938,7 @@ void VideoPlayer::handleProducerFinished()
         if (sourceType_ == VideoSourceType::Rtsp)
         {
             opened_ = false;
-            decoder_.close();
+            closeActiveInput();
             fileName_.clear();
             sourceType_ = VideoSourceType::File;
             resetSyncState();
@@ -659,12 +946,14 @@ void VideoPlayer::handleProducerFinished()
             return;
         }
 
-        if (opened_ && !decoder_.seekToStart())
+        if (opened_ && !seekActiveInputToStart())
         {
-            const QString seekError = decoder_.lastError().isEmpty()
+            const QString inputError = activeInputLastError();
+            const QString seekError = inputError.isEmpty()
                 ? QStringLiteral("Could not reset the video after reaching the end.")
-                : decoder_.lastError();
+                : inputError;
             opened_ = false;
+            closeActiveInput();
             setLastError(seekError);
             resetSyncState();
             emit errorOccurred(seekError);
@@ -680,6 +969,7 @@ void VideoPlayer::handleProducerFinished()
     opened_ = false;
     fileName_.clear();
     sourceType_ = VideoSourceType::File;
+    closeActiveInput();
     resetSyncState();
     setLastError(message);
     emit errorOccurred(message);
@@ -752,49 +1042,50 @@ void VideoPlayer::emitState()
 
 bool VideoPlayer::initializeDetector()
 {
-    const std::string backend = environmentValue("IVP_DETECTOR_BACKEND");
-    const bool useTensorRT =
-        backend == "tensorrt" || backend == "TensorRT" || backend == "TENSORRT";
+    ivp::DetectorConfig config = detectorConfig_;
 
-    if (useTensorRT)
+    std::unique_ptr<ivp::IDetector> candidate;
+    if (config.backend == ivp::DetectorBackend::TensorRT)
     {
-        detector_ = std::make_unique<ivp::YoloTensorRTDetector>();
+        candidate = std::make_unique<ivp::YoloTensorRTDetector>();
+    }
+    else if (config.backend == ivp::DetectorBackend::OpenCVDnn)
+    {
+        candidate = std::make_unique<ivp::YoloOpenCVDnnDetector>();
     }
     else
     {
-        detector_ = std::make_unique<ivp::MockDetector>();
+        candidate = std::make_unique<ivp::MockDetector>();
     }
 
-    if (detector_ == nullptr)
+    if (candidate == nullptr)
     {
         setLastError(QStringLiteral("The inference detector is not available."));
         return false;
     }
 
-    ivp::DetectorConfig config;
-    config.backend = useTensorRT
-        ? ivp::DetectorBackend::TensorRT
-        : ivp::DetectorBackend::Mock;
-    config.confidenceThreshold = 0.5F;
-    config.nmsThreshold = 0.45F;
-    config.simulatedDelayMs = kMockInferenceDelayMs;
-    // 模块 6 需要持续显示移动模拟框，因此先让 MockDetector 每帧产生结果。
-    config.detectEveryNFrames = 1;
-    config.enginePath = environmentValue("IVP_YOLO_ENGINE");
-    config.labelsPath = environmentValue("IVP_YOLO_LABELS");
-    config.inputWidth = environmentInt("IVP_YOLO_INPUT_WIDTH", 640);
-    config.inputHeight = environmentInt("IVP_YOLO_INPUT_HEIGHT", 640);
-    config.classCount = environmentInt("IVP_YOLO_CLASS_COUNT", 0);
-    config.maxDetections = environmentInt("IVP_YOLO_MAX_DETECTIONS", 100);
-
-    if (!detector_->initialize(config))
+    if (config.simulatedDelayMs < 0)
     {
-        const std::string detectorError = detector_->lastError();
+        config.simulatedDelayMs = kMockInferenceDelayMs;
+    }
+    if (config.detectEveryNFrames <= 0)
+    {
+        config.detectEveryNFrames = 1;
+    }
+    if (config.maxDetections <= 0)
+    {
+        config.maxDetections = 100;
+    }
+
+    if (!candidate->initialize(config))
+    {
+        const std::string detectorError = candidate->lastError();
         setLastError(detectorError.empty()
             ? QStringLiteral("Could not initialize the inference detector.")
             : QString::fromStdString(detectorError));
         return false;
     }
 
+    detector_ = std::move(candidate);
     return true;
 }

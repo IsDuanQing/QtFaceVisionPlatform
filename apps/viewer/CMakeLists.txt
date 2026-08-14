@@ -4,6 +4,8 @@ add_executable(IndustrialVisionViewer
     MainWindow.h
     DetectionHistoryTableModel.cpp
     DetectionHistoryTableModel.h
+    ViewerSettingsStore.cpp
+    ViewerSettingsStore.h
     VideoDisplayWidget.cpp
     VideoDisplayWidget.h
 )
@@ -14,4 +16,6 @@ target_link_libraries(IndustrialVisionViewer
         ivp_results
         ivp_storage
         ivp_playback
+        ivp_network
+        ivp_control
 )

@@ -19,7 +19,8 @@ IndustrialVisionPlatform/
     playback/                播放流程协调
     inference/               TensorRT / YOLO 推理模块占位
     results/                 检测结果缓存、查询与统计
-    network/                 epoll / TCP 通信模块占位
+    network/                 检测结果导出与 TCP 发布
+    control/                 检测服务端与控制协议
     storage/                 SQLite / 检测记录存储模块
 
   docs/                      学习笔记与阶段性设计文档
@@ -40,6 +41,14 @@ IndustrialVisionPlatform/
 - `docs/module-8-sqlite-storage.md`：SQLite 检测结果存储
 - `docs/module-9-history-query.md`：历史检测记录查询界面
 - `docs/module-10-yolo-tensorrt.md`：YOLO TensorRT 推理准备
+- `docs/module-11-image-sequence-input.md`：图片文件夹模拟视频输入
+- `docs/module-12-detector-configuration.md`：检测参数配置界面
+- `docs/module-13-settings-persistence.md`：检测参数持久化与启动恢复
+- `docs/module-14-tensorrt-closure.md`：真实 TensorRT 推理闭环
+- `docs/module-15-result-export-network-publish.md`：检测结果导出和网络发送
+- `docs/module-16-detection-control-server.md`：检测服务端与控制协议
+- `docs/module-17-remote-task-configuration.md`：远程检测任务配置协议
+- `docs/module-18-yolo-opencv-dnn.md`：OpenCV DNN 真实 YOLO 检测闭环
 - `docs/test-issues-and-solutions.md`：测试问题记录与解决方案
 
 ## 模块职责
@@ -52,8 +61,11 @@ Qt 可视化客户端。
 - 创建主窗口和交互界面
 - 打开本地视频文件
 - 输入并打开 RTSP 视频流
+- 打开图片文件夹作为模拟视频输入
 - 显示视频画面
 - 叠加显示检测框和标签
+- 编辑检测后端、阈值、模型路径和图片序列 FPS
+- 保存并恢复检测参数配置
 - 显示分辨率、FPS、音频状态、播放状态等信息
 - 响应播放、暂停、停止等用户操作
 
@@ -98,9 +110,10 @@ Qt 可视化客户端。
 - `VideoInputConfig`
 - `FFmpegDecoder`
 - `FrameConverter`
+- `ImageSequenceReader`
 
 后续目标：
-- 支持 MP4、RTSP
+- 支持 MP4、RTSP、图片文件夹
 - 支持转换为 `cv::Mat`
 - 为 TensorRT 输入预处理提供帧数据
 
@@ -145,6 +158,7 @@ Qt 可视化客户端。
 负责：
 - 协调视频解码、显示适配、音频播放
 - 管理视频读取生产线程
+- 根据当前配置初始化检测器
 - 使用 `FrameDispatcher` 分发显示帧和推理帧
 - 将 `VideoFrame` 转换为 Qt 可显示的 `QImage`
 - 向 UI 层发送可显示帧
@@ -159,6 +173,7 @@ Qt 可视化客户端。
 后续目标：
 - 将检测结果回传给 UI 绘制缺陷框
 - 继续减少播放模块对推理实现细节的了解
+- 支持文件、RTSP、图片序列三种输入源统一调度
 
 ### modules/inference
 
@@ -169,13 +184,6 @@ AI 推理模块。
 - 定义推理参数
 - 输出结构化检测结果
 - 提供 `MockDetector` 验证推理链路
-
-当前类：
-- `IDetector`
-- `MockDetector`
-- `DetectorConfig`
-
-后续负责：
 - 加载 ONNX / TensorRT Engine
 - 管理 CUDA / TensorRT 资源
 - 执行 YOLO 推理
@@ -183,11 +191,24 @@ AI 推理模块。
 - 检测结果解析
 - 支持 FP16 加速
 
-计划类：
+当前接口与配置：
+- `IDetector`
+- `DetectorConfig`
+
+当前实现类：
+- `MockDetector`
 - `TensorRTEngine`
-- `YoloDetector`
-- `Preprocessor`
-- `Postprocessor`
+- `YoloPreprocessor`
+- `YoloPostprocessor`
+- `YoloOpenCVDnnDetector`
+- `YoloTensorRTDetector`
+
+说明：
+- 默认 Qt demo 仍使用 `MockDetector`
+- 定义 `IVP_ENABLE_OPENCV_DNN` 后才编译 OpenCV DNN 真实 ONNX 推理代码
+- 定义 `IVP_ENABLE_TENSORRT` 后才编译真实 TensorRT 执行代码
+- 当前 YOLO 输入约定为 `images [1, 3, 1088, 1088]`
+- 当前 YOLO 输出约定为 `output0 [1, 24, 24276]`
 
 ### modules/results
 
@@ -212,20 +233,45 @@ AI 推理模块。
 
 ### modules/network
 
-网络通信模块占位。
+检测结果导出与网络发布模块。
 
-后续负责：
-- 基于 Linux socket / epoll 实现 TCP 服务端
-- 管理多客户端连接
-- 接收检测任务控制命令
-- 推送检测结果和运行状态
+负责：
+- 将一帧检测结果导出为 JSON Lines 或 CSV
+- 通过 TCP 将检测结果推送到外部接收端
+- 维护导出路径、连接状态和错误信息
+- 尽量不阻塞播放和推理主流程
 
-计划功能：
-- 启动检测
-- 停止检测
-- 查询状态
-- 配置模型参数
-- 传输检测结果 JSON
+当前类：
+- `DetectionDeliverySettings`
+- `DetectionFramePacket`
+- `DetectionResultDelivery`
+
+说明：
+- 当前实现是 Qt 客户端侧的结果发布器，采用异步 `QTcpSocket`
+- 先支持单接收端、JSON Lines 发送和可选 CSV 落盘
+- 后续如果要做 Linux `epoll` 服务端，可以在这个模块之外再拆控制通道和结果通道
+
+### modules/control
+
+检测服务端与控制协议模块。
+
+负责：
+- 在 Linux 下启动 `epoll` TCP 服务端
+- 支持多个外部客户端同时连接
+- 接收检测控制命令
+- 返回当前检测状态快照
+- 将最新检测结果广播给已连接客户端
+- 保持控制协议和 Qt 界面解耦
+
+当前类：
+- `DetectionControlServerSettings`
+- `DetectionControlStatus`
+- `DetectionControlServer`
+
+说明：
+- 当前协议采用 JSON Lines，一行就是一条完整命令或事件
+- 当前支持 `start`、`stop`、`status`、`ping`
+- Windows / MinGW Qt demo 下保留占位实现，真实 `epoll` 服务端只在 Linux 启用
 
 ### modules/storage
 
@@ -277,7 +323,7 @@ VideoPlayer
   |                  IDetector -> DetectionResults
   |                       |
   |                       v
-  |                  ResultManager -> UI 统计 / 后续存储与网络发送
+  |                  ResultManager -> UI 统计 / 存储 / 结果导出 / TCP 发布 / 控制服务广播
   |
   |-----------------> AudioPlayer
                           |
@@ -450,15 +496,180 @@ VideoPlayer
 - 新增 `YoloPreprocessor`，完成 RGB24 到 letterbox/CHW float 输入。
 - 新增 `YoloPostprocessor`，完成常见 YOLO 输出解析、置信度过滤和 NMS。
 - 新增 `YoloTensorRTDetector` 作为 `IDetector` 的可替换实现。
-- `VideoPlayer` 支持通过环境变量选择 `MockDetector` 或 TensorRT 后端。
+- `VideoPlayer` 支持通过 `DetectorConfig` 选择 `MockDetector` 或 TensorRT 后端。
+- `VideoPlayer` 可默认查找 `models/yolo11l` 下的 ONNX、Engine 和标签文件。
+- 新增 `TensorRTEngine`，封装 TensorRT Engine 加载、I/O Tensor、CUDA Buffer 和 `enqueueV3`。
+- `YoloTensorRTDetector` 已串起前处理、TensorRT 推理和后处理流程。
 - 新增前后处理单元测试。
 
 当前限制：
-- 尚未绑定真实 CUDA/TensorRT Engine。
-- 真实模型接入前需要确认 ONNX 输入输出形状、类别顺序和坐标格式。
+- TensorRT 后端默认不编译；需要显式打开 `IVP_ENABLE_TENSORRT` 并链接 `nvinfer/cudart`。
+- 当前只支持一个输入 Tensor 和一个输出 Tensor，且 Tensor 类型为 FLOAT。
+- `.onnx` 和 `.engine` 为本地模型资源，不建议提交到 GitHub。
 
 学习重点：
 - letterbox 缩放和检测框反算。
 - HWC 与 CHW 内存布局。
 - YOLO 输出格式、objectness、类别分数和 class-aware NMS。
 - TensorRT 资源生命周期与 GPU 异步执行。
+
+## 模块 12 当前状态
+
+模块 12：检测参数配置界面。
+
+已完成：
+- `VideoPlayer` 持有 `DetectorConfig`，打开输入源前按当前配置初始化检测器。
+- `MainWindow` 增加检测参数面板。
+- 支持设置检测后端、置信度阈值、NMS 阈值、最大检测数量、输入尺寸、类别数、Mock 延迟和抽帧间隔。
+- 支持设置 ONNX、TensorRT Engine、labels 文件路径。
+- 支持设置图片文件夹模拟视频输入的 FPS。
+- 支持点击 `Apply Parameters` 运行中应用检测器参数。
+- `Clear Filters` 只清历史筛选条件，`Clear Overlay` 用于清当前画面检测框。
+
+当前限制：
+- 图片序列 FPS 修改后仍需要重新打开图片目录才生效。
+- MinGW Qt demo 默认仍建议使用 `MockDetector`。
+- TensorRT 后端配置入口已存在，但真实执行仍建议放到 MSVC Kit 或 Linux 环境验证。
+
+学习重点：
+- 为什么运行参数要集中到配置对象。
+- UI 参数如何传递到业务模块。
+- 为什么不要让 `VideoPlayer` 长期依赖环境变量。
+- 为什么运行中热切换检测器需要线程同步。
+
+## 模块 13 当前状态
+
+模块 13：检测参数持久化与启动恢复。
+
+已完成：
+- 新增 `ViewerSettingsStore`，使用 `QSettings` 读写 INI 配置文件。
+- 启动时恢复检测参数和图片序列 FPS。
+- 退出时保存当前参数。
+- 支持 `Restore Defaults` 恢复程序默认配置。
+- 配置文件默认位于 `QStandardPaths::AppLocalDataLocation/settings.ini`。
+
+当前限制：
+- 只保存检测参数，不保存最近打开的视频、RTSP 地址或图片目录。
+- 配置文件版本迁移只预留了 `schemaVersion`，暂未实现升级逻辑。
+- 参数仍在下一次打开输入源时生效，不做运行中热切换。
+
+学习重点：
+- `QSettings` 的 INI 持久化方式。
+- 默认配置和用户配置的边界。
+- 为什么配置存储属于 Qt 客户端层，而不是播放层或推理层。
+
+## 模块 14 当前状态
+
+模块 14：真实 TensorRT 推理闭环。
+
+已完成：
+- `YoloTensorRTDetector` 现在支持 `detectEveryNFrames`。
+- 推理线程会检查 detector 的 `lastError()`，真实失败会回传到 UI。
+- 新增 `ivp_yolo_tensorrt_detector_smoke_test`，用于验证真实推理链路。
+
+当前限制：
+- MinGW Qt demo 依然更适合跑 `MockDetector`。
+- 真实 TensorRT 建议在 MSVC Kit 或 Linux 上验证。
+- 目前还没有做多 engine、多模型版本切换。
+
+学习重点：
+- 真实推理失败如何回传。
+- 为什么 detector 的节流行为要和 Mock 对齐。
+- 为什么真实 TensorRT 要先做 smoke test，再接 UI。
+
+## 模块 15 当前状态
+
+模块 15：检测结果导出和网络发送。
+
+已完成：
+- 新增 `DetectionDeliverySettings`，统一描述导出目录、格式和 TCP 发布参数。
+- 新增 `DetectionFramePacket`，把一帧检测结果和上下文打包成可传输对象。
+- 新增 `DetectionResultDelivery`，支持 JSON Lines / CSV 落盘和异步 TCP 发布。
+- `MainWindow` 增加结果导出和网络发送配置区。
+- 检测结果回调时会进入导出/发送链路，网络写入由事件循环异步完成。
+- 新增 smoke test，覆盖本地文件导出和 TCP 收包。
+
+当前限制：
+- 目前是单接收端发布器，还不是 epoll 多客户端服务端。
+- TCP 侧当前只发布 JSON Lines，不负责命令控制通道。
+- 失败重连和背压策略还比较轻量，后续可以继续增强。
+
+学习重点：
+- 为什么结果导出不能绑死在 UI 线程里。
+- JSON Lines 和 CSV 各适合什么场景。
+- 为什么网络发送和文件落盘要做成同一个“交付”模块。
+- 如何用本地 `QTcpServer` 做异步网络烟测。
+
+## 模块 16 当前状态
+
+模块 16：检测服务端与控制协议。
+
+已完成：
+- 新增 `modules/control`。
+- 新增 `DetectionControlServer`，Linux 下基于 `epoll` 实现多客户端 TCP 服务端。
+- 协议采用 JSON Lines，支持 `start`、`stop`、`status`、`ping`。
+- Qt 主窗口启动时会初始化控制服务，默认监听 `127.0.0.1:9100`。
+- 检测结果产生后会通过控制服务广播给已连接客户端。
+- 新增 Linux smoke test，覆盖连接、状态查询、启动命令和停止命令。
+
+当前限制：
+- Windows / MinGW demo 环境使用 Qt `QTcpServer` 后端；Linux 环境使用 `epoll` 后端。
+- `start` 暂时只恢复已经打开的输入源，不负责远程打开视频或 RTSP。
+- 协议暂时没有鉴权、命令序号、ACK 重试和任务配置字段。
+
+学习重点：
+- TCP 粘包/半包与 JSON Lines 消息边界。
+- Linux `epoll` 服务端的 non-blocking socket 事件循环。
+- 服务端线程如何通过 Qt queued signal 安全通知 UI 线程。
+- 控制通道为什么要和检测结果导出通道分开。
+
+## 模块 17 当前状态
+
+模块 17：远程检测任务配置协议。
+
+已完成：
+- `DetectionControlProtocol` 新增 `DetectionTaskConfig`。
+- 控制协议新增 `configure_task` 命令。
+- 支持远程下发 `source_type`、`source_url`、`auto_start`。
+- 支持远程下发检测后端、置信度阈值、NMS 阈值、输入尺寸、类别数、最大检测数量和模型路径。
+- 支持远程下发 `task_id`、`production_line_id`、`batch_id`。
+- `MainWindow` 新增远程任务应用流程，复用当前 UI 参数控件和 `VideoPlayer` 链路。
+- 检测结果包新增任务上下文字段，JSON Lines、CSV 和控制服务广播都会携带任务归属。
+- 非 Linux 环境新增 Qt `QTcpServer` 后端，本地 Qt Creator demo 也可以测试控制协议。
+
+当前限制：
+- `configure_task` 返回 accepted 只代表服务端已经接收命令，不代表视频源一定打开成功。
+- 当前还没有 `request_id`、ACK、任务执行完成事件和统一错误码。
+- 远程任务仍然运行在 Qt demo 进程内，尚未拆成独立无界面检测服务。
+- 协议未做鉴权，只适合本机或可信网络测试。
+
+学习重点：
+- 为什么控制协议要区分“命令接收成功”和“任务执行成功”。
+- 为什么远程任务字段采用可选覆盖策略。
+- 为什么检测结果要带 `task_id`、产线号和批次号。
+- Qt `QTcpServer` 本地测试后端与 Linux `epoll` 服务端的职责差异。
+
+## 模块 18 当前状态
+
+模块 18：YoloOpenCVDnnDetector 真实 YOLO 检测闭环。
+
+已完成：
+- 新增 `DetectorBackend::OpenCVDnn`。
+- 新增 `YoloOpenCVDnnDetector`，通过 OpenCV DNN 加载 ONNX 模型。
+- OpenCV DNN 后端复用已有 `YoloPreprocessor` 和 `YoloPostprocessor`。
+- Qt 后端选择框新增 `OpenCV DNN`。
+- 远程任务协议支持 `detector_backend=opencv_dnn`。
+- qmake 和 CMake 都支持可选启用 `IVP_ENABLE_OPENCV_DNN`。
+- 默认未启用 OpenCV DNN 时，会返回清晰错误，不影响 Mock demo 编译运行。
+
+当前限制：
+- OpenCV DNN 后端默认使用 CPU。
+- 当前只取第一个输出 Tensor。
+- 当前仍要求 YOLO 输出布局符合已有后处理支持的格式。
+- OpenCV DNN 用于先验证真实检测闭环，最终高性能部署仍建议继续完善 TensorRT。
+
+学习重点：
+- ONNX 是模型格式，OpenCV DNN 是推理运行时。
+- 为什么真实后端也应该实现统一的 `IDetector`。
+- 为什么前处理和后处理要复用，而不是每个后端各写一份。
+- 如何先验证真实框，再做 TensorRT 加速。

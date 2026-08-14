@@ -12,7 +12,8 @@ namespace ivp
 enum class DetectorBackend
 {
     Mock,
-    TensorRT
+    TensorRT,
+    OpenCVDnn
 };
 
 struct DetectorConfig
@@ -22,15 +23,16 @@ struct DetectorConfig
     float nmsThreshold = 0.45F;
     int simulatedDelayMs = 0;
     int detectEveryNFrames = 1;
-    int inputWidth = 640;
-    int inputHeight = 640;
+    int inputWidth = 1088;
+    int inputHeight = 1088;
     int classCount = 0;
     int maxDetections = 100;
+    std::string onnxPath;
     std::string enginePath;
     std::string labelsPath;
 };
 
-// Stable inference boundary shared by MockDetector and future TensorRT detectors.
+// Stable inference boundary shared by mock and real YOLO detectors.
 class IDetector
 {
 public:

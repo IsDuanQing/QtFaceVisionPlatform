@@ -16,14 +16,11 @@
 #include "audio/AudioPlayer.h"
 #include "common/DetectionResult.h"
 #include "common/VideoFrame.h"
+#include "inference/IDetector.h"
 #include "pipeline/FrameDispatcher.h"
 #include "video/FFmpegDecoder.h"
+#include "video/ImageSequenceReader.h"
 #include "video/VideoInputConfig.h"
-
-namespace ivp
-{
-class IDetector;
-}
 
 Q_DECLARE_METATYPE(ivp::DetectionResults)
 
@@ -41,6 +38,10 @@ public:
 
     bool open(const QString& filename);
     bool openRtsp(const QString& rtspUrl);
+    bool openImageSequence(const QString& directoryPath, double fps = 10.0);
+    void setDetectorConfig(const ivp::DetectorConfig& config);
+    bool applyDetectorConfig(const ivp::DetectorConfig& config);
+    ivp::DetectorConfig detectorConfig() const;
     void play();
     void pause();
     void stop();
@@ -83,6 +84,14 @@ private:
     void consumeFileFrame();
     void consumeRtspFrame();
     bool openInput(const VideoInputConfig& config);
+    bool readNextInputFrame(ivp::VideoFrame* frame);
+    QString activeInputLastError() const;
+    bool seekActiveInputToStart();
+    void closeActiveInput();
+    int activeInputWidth() const;
+    int activeInputHeight() const;
+    double activeInputFrameRate() const;
+    qint64 activeInputDurationMs() const;
     bool startProducerThread();
     void stopProducerThread();
     void producerLoop();
@@ -95,30 +104,33 @@ private:
     void emitState();
     bool initializeDetector();
 
-    FFmpegDecoder decoder_;
-    AudioPlayer audioPlayer_;
-    std::unique_ptr<ivp::IDetector> detector_;
-    ivp::FrameDispatcher frameDispatcher_;
+    FFmpegDecoder decoder_; // 解码器
+    ImageSequenceReader imageSequenceReader_; // 把图片序列当成视频进行读取
+    AudioPlayer audioPlayer_; // 播放器
+    std::unique_ptr<ivp::IDetector> detector_; // 检测器
+    ivp::DetectorConfig detectorConfig_;
+    ivp::FrameDispatcher frameDispatcher_; // 帧调度队列:UI显示队列，AI推理队列
     ivp::VideoFramePtr pendingFrame_;
-    QTimer frameTimer_;
-    QElapsedTimer fallbackClock_;
-    std::thread producerThread_;
-    std::thread inferenceThread_;
+    QTimer frameTimer_; // 画面刷新定时器
+    QElapsedTimer fallbackClock_; // 备用软件时钟
+    std::thread producerThread_; // 生产者：解码线程
+    std::thread inferenceThread_; // 消费者：AI检测线程
     mutable std::mutex errorMutex_;
+    mutable std::mutex detectorMutex_;
     QString fileName_;
     QString lastError_;
     QString producerError_;
     VideoSourceType sourceType_;
     qint64 fallbackClockBaseMs_;
-    qint64 firstVideoPtsMs_;
+    qint64 firstVideoPtsMs_; // 第一帧时间戳，用来做时间归零
     qint64 pendingFramePositionMs_;
     qint64 lastVideoPositionMs_;
-    std::atomic<bool> producerStopRequested_;
-    std::atomic<bool> producerFinished_;
+    std::atomic<bool> producerStopRequested_; // 原子变量，控制线程启停
+    std::atomic<bool> producerFinished_; // 解码线程是否读取完毕视频末尾
     std::atomic<bool> inferenceStopRequested_;
-    bool hasAudio_;
-    bool opened_;
-    bool playing_;
+    bool hasAudio_; // 是否存在音频流
+    bool opened_; // 是否视频源打开
+    bool playing_; // 是否正常播放
     bool firstVideoPtsReady_;
     bool framePending_;
 };

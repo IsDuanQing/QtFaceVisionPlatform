@@ -8,6 +8,11 @@ target_include_directories(ivp_playback
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+target_compile_definitions(ivp_playback
+    PRIVATE
+        IVP_PROJECT_ROOT="${PROJECT_SOURCE_DIR}"
+)
+
 target_link_libraries(ivp_playback
     PUBLIC
         Qt5::Core

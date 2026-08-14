@@ -1,0 +1,38 @@
+#ifndef VIEWERSETTINGSSTORE_H
+#define VIEWERSETTINGSSTORE_H
+
+#include <QString>
+
+#include "inference/IDetector.h"
+#include "network/DetectionDeliverySettings.h"
+
+namespace ivp::viewer
+{
+
+struct ViewerSettings
+{
+    ivp::DetectorConfig detectorConfig;
+    double imageSequenceFps = 10.0;
+    ivp::DetectionDeliverySettings delivery;
+};
+
+// Persists viewer-owned settings without coupling the inference or playback modules
+// to QSettings.
+class ViewerSettingsStore final
+{
+public:
+    explicit ViewerSettingsStore(const QString& filePath = QString());
+
+    ViewerSettings load(const ViewerSettings& defaults) const;
+    bool save(const ViewerSettings& settings) const;
+    QString filePath() const;
+
+private:
+    QString resolvedFilePath() const;
+
+    QString filePathOverride_;
+};
+
+} // namespace ivp::viewer
+
+#endif // VIEWERSETTINGSSTORE_H
