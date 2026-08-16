@@ -71,13 +71,17 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    QTcpServer server;
-    if (!server.listen(QHostAddress::LocalHost, 0))
+    QTcpServer portProbe;
+    if (!portProbe.listen(QHostAddress::LocalHost, 0))
     {
-        std::cerr << "Could not start local TCP server: "
-                  << server.errorString().toStdString() << "\n";
+        std::cerr << "Could not probe a free TCP port: "
+                  << portProbe.errorString().toStdString() << "\n";
         return 2;
     }
+    const quint16 port = portProbe.serverPort();
+    portProbe.close();
+
+    QTcpServer server;
 
     ivp::DetectionDeliverySettings settings;
     settings.exportEnabled = true;
@@ -85,15 +89,23 @@ int main(int argc, char** argv)
     settings.exportFormat = ivp::ResultExportFormat::Csv;
     settings.networkEnabled = true;
     settings.networkHost = QStringLiteral("127.0.0.1");
-    settings.networkPort = static_cast<int>(server.serverPort());
+    settings.networkPort = static_cast<int>(port);
 
     ivp::DetectionResultDelivery delivery;
     delivery.setConfig(settings);
 
     if (!delivery.deliver(makePacket()))
     {
-        std::cerr << "Delivery failed: "
+        std::cerr << "Initial delivery should have been queued, but failed: "
                   << delivery.lastError().toStdString() << "\n";
+        return 2;
+    }
+
+    if (!waitForCondition([&delivery]() {
+            return !delivery.networkConnected();
+        }, 1000))
+    {
+        std::cerr << "Delivery should stay disconnected before server starts.\n";
         return 3;
     }
 
@@ -121,30 +133,37 @@ int main(int argc, char** argv)
         return 6;
     }
 
+    if (!server.listen(QHostAddress::LocalHost, static_cast<quint16>(settings.networkPort)))
+    {
+        std::cerr << "Could not start local TCP server: "
+                  << server.errorString().toStdString() << "\n";
+        return 7;
+    }
+
     if (!waitForCondition([&server]() {
             return server.hasPendingConnections();
-        }, 2000))
+        }, 4000))
     {
-        std::cerr << "TCP server did not receive a connection.\n";
-        return 7;
+        std::cerr << "TCP server did not receive a delayed connection.\n";
+        return 8;
     }
 
     QTcpSocket* client = server.nextPendingConnection();
     if (client == nullptr)
     {
         std::cerr << "Could not accept TCP client.\n";
-        return 8;
+        return 9;
     }
 
     QByteArray networkPayload;
     if (!waitForCondition([&networkPayload, client]() {
             networkPayload.append(client->readAll());
             return networkPayload.contains('\n');
-        }, 2000))
+        }, 4000))
     {
-        std::cerr << "TCP server did not receive a result packet.\n";
+        std::cerr << "TCP server did not receive a result packet after reconnect.\n";
         client->deleteLater();
-        return 9;
+        return 10;
     }
 
     client->deleteLater();
@@ -155,7 +174,7 @@ int main(int argc, char** argv)
         || !networkPayload.endsWith('\n'))
     {
         std::cerr << "TCP JSON Lines payload is invalid.\n";
-        return 10;
+        return 11;
     }
 
     std::cout << "Detection result delivery smoke test passed.\n";

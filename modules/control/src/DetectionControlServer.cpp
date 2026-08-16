@@ -65,6 +65,21 @@ QJsonObject makeOkReply(const QString& type)
     return object;
 }
 
+void appendRequestId(const QJsonObject& command, QJsonObject* reply)
+{
+    const QJsonValue value = command.value(QStringLiteral("request_id"));
+    if (!value.isString())
+    {
+        return;
+    }
+
+    const QString requestId = value.toString().trimmed();
+    if (!requestId.isEmpty())
+    {
+        reply->insert(QStringLiteral("request_id"), requestId);
+    }
+}
+
 QJsonObject makeStatusReply(const ivp::DetectionControlStatus& status)
 {
     QJsonObject object;
@@ -235,12 +250,26 @@ bool readDoubleField(
     return true;
 }
 
+bool validateNonEmptyField(
+    const std::optional<QString>& value,
+    const QString& key,
+    QString* error)
+{
+    if (value.has_value() && value->isEmpty())
+    {
+        *error = QStringLiteral("%1 must not be empty.").arg(key);
+        return false;
+    }
+    return true;
+}
+
 bool parseTaskConfig(
     const QJsonObject& command,
     ivp::DetectionTaskConfig* config,
     QString* error)
 {
-    if (!readStringField(command, QStringLiteral("task_id"), &config->taskId, error)
+    if (!readStringField(command, QStringLiteral("request_id"), &config->requestId, error)
+        || !readStringField(command, QStringLiteral("task_id"), &config->taskId, error)
         || !readStringField(command, QStringLiteral("source_type"), &config->sourceType, error)
         || !readStringField(command, QStringLiteral("source_url"), &config->sourceUrl, error)
         || !readDoubleField(command, QStringLiteral("image_sequence_fps"), 0.1, 240.0, &config->imageSequenceFps, error)
@@ -260,6 +289,32 @@ bool parseTaskConfig(
         || !readStringField(command, QStringLiteral("engine_path"), &config->enginePath, error)
         || !readStringField(command, QStringLiteral("labels_path"), &config->labelsPath, error))
     {
+        return false;
+    }
+
+    if (!validateNonEmptyField(config->requestId, QStringLiteral("request_id"), error)
+        || !validateNonEmptyField(config->taskId, QStringLiteral("task_id"), error)
+        || !validateNonEmptyField(config->sourceType, QStringLiteral("source_type"), error)
+        || !validateNonEmptyField(config->sourceUrl, QStringLiteral("source_url"), error)
+        || !validateNonEmptyField(
+            config->productionLineId,
+            QStringLiteral("production_line_id"),
+            error)
+        || !validateNonEmptyField(config->batchId, QStringLiteral("batch_id"), error)
+        || !validateNonEmptyField(
+            config->detectorBackend,
+            QStringLiteral("detector_backend"),
+            error)
+        || !validateNonEmptyField(config->onnxPath, QStringLiteral("onnx_path"), error)
+        || !validateNonEmptyField(config->enginePath, QStringLiteral("engine_path"), error)
+        || !validateNonEmptyField(config->labelsPath, QStringLiteral("labels_path"), error))
+    {
+        return false;
+    }
+
+    if (config->sourceType.has_value() != config->sourceUrl.has_value())
+    {
+        *error = QStringLiteral("source_type and source_url must be provided together.");
         return false;
     }
 
@@ -285,7 +340,7 @@ bool parseTaskConfig(
             && backend != QStringLiteral("tensorrt"))
         {
             *error = QStringLiteral(
-                "detector_backend must be mock, opencv_dnn, or tensorrt.");
+                "detector_backend must be mock, opencv, opencv_dnn, or tensorrt.");
             return false;
         }
         config->detectorBackend = backend == QStringLiteral("opencv")
@@ -518,11 +573,13 @@ bool DetectionControlServer::start(const DetectionControlServerSettings& setting
                                     reply = makeErrorReply(
                                         QStringLiteral("invalid_task_config"),
                                         taskError);
+                                    appendRequestId(command, &reply);
                                 }
                                 else
                                 {
                                     reply = makeOkReply(QStringLiteral("configure_task"));
                                     reply.insert(QStringLiteral("accepted"), true);
+                                    appendRequestId(command, &reply);
                                     notifyTaskConfigRequested(taskConfig);
                                 }
                             }
@@ -880,11 +937,13 @@ bool DetectionControlServer::start(const DetectionControlServerSettings& setting
                                             reply = makeErrorReply(
                                                 QStringLiteral("invalid_task_config"),
                                                 parseError);
+                                            appendRequestId(command, &reply);
                                         }
                                         else
                                         {
                                             reply = makeOkReply(QStringLiteral("configure_task"));
                                             reply.insert(QStringLiteral("accepted"), true);
+                                            appendRequestId(command, &reply);
                                             taskRequests.push_back(taskConfig);
                                         }
                                     }

@@ -50,6 +50,7 @@
 ```json
 {
   "type": "configure_task",
+  "request_id": "req-001",
   "task_id": "task-001",
   "source_type": "rtsp",
   "source_url": "rtsp://127.0.0.1:8554/test",
@@ -72,16 +73,21 @@
 服务端返回：
 
 ```json
-{"type":"configure_task","ok":true,"accepted":true}
+{"type":"configure_task","ok":true,"accepted":true,"request_id":"req-001"}
 ```
 
 如果字段类型或取值范围不合法，服务端返回：
 
 ```json
-{"type":"error","code":"invalid_task_config","message":"confidence_threshold is out of range."}
+{"type":"error","code":"invalid_task_config","request_id":"req-001","message":"confidence_threshold is out of range."}
 ```
 
 ## 字段说明
+
+`request_id` 是客户端生成的请求标识，用来把服务端 ACK 或错误回包和原始请求对应起来。
+它不是检测任务编号，不参与结果追溯，可以每次请求都不同。
+
+`task_id` 是检测任务编号，会进入状态快照和检测结果包，用于后续查询、导出、统计和质量追溯。
 
 `source_type` 支持：
 
@@ -188,6 +194,12 @@ MainWindow::applyRemoteTaskConfig()
 3. 为什么服务端不能直接操作 UI 或播放器，而要发信号交给主线程。
 4. 为什么检测结果必须带任务上下文，方便追溯和统计。
 5. 如何设计错误码，而不是只返回一段自然语言错误。
+
+你现在最该重点学的是：
+
+- `request_id` 为什么要和 ACK 一起返回
+- 为什么服务端要先做字段校验，再把任务交给 UI 线程
+- 为什么 `status` 既是查询接口，也是外部系统的同步依据
 
 ## 下一步建议
 

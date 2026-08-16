@@ -630,6 +630,8 @@ VideoPlayer
 已完成：
 - `DetectionControlProtocol` 新增 `DetectionTaskConfig`。
 - 控制协议新增 `configure_task` 命令。
+- `configure_task` 支持 `request_id`，成功和失败回包都能对账。
+- `configure_task` 会先做字段类型、范围和空值校验，再交给 Qt 主线程处理。
 - 支持远程下发 `source_type`、`source_url`、`auto_start`。
 - 支持远程下发检测后端、置信度阈值、NMS 阈值、输入尺寸、类别数、最大检测数量和模型路径。
 - 支持远程下发 `task_id`、`production_line_id`、`batch_id`。
@@ -639,7 +641,7 @@ VideoPlayer
 
 当前限制：
 - `configure_task` 返回 accepted 只代表服务端已经接收命令，不代表视频源一定打开成功。
-- 当前还没有 `request_id`、ACK、任务执行完成事件和统一错误码。
+- 当前还没有任务执行完成事件和统一错误码。
 - 远程任务仍然运行在 Qt demo 进程内，尚未拆成独立无界面检测服务。
 - 协议未做鉴权，只适合本机或可信网络测试。
 

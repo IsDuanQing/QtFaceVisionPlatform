@@ -6,6 +6,7 @@
 #include <QQueue>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 
 #include "network/DetectionDeliverySettings.h"
 #include "network/DetectionFramePacket.h"
@@ -43,6 +44,7 @@ signals:
     void statusChanged(bool connected, const QString& message);
 
 private slots:
+    void attemptNetworkReconnect();
     void flushNetworkQueue();
     void handleSocketConnected();
     void handleSocketDisconnected();
@@ -57,10 +59,13 @@ private:
         bool includeHeader) const;
     static QByteArray csvHeader();
     static QByteArray escapeCsv(const QString& value);
+    void scheduleNetworkReconnect();
+    void stopNetworkReconnect();
     void setStatus(bool connected, const QString& message);
 
     DetectionDeliverySettings config_;
     QTcpSocket* socket_;
+    QTimer reconnectTimer_;
     QQueue<QByteArray> pendingNetworkMessages_;
     QString exportFilePath_;
     QString lastError_;

@@ -50,6 +50,9 @@ struct DetectionControlStatus
 // parameters they need, while the Qt UI keeps providing defaults.
 struct DetectionTaskConfig
 {
+    // Optional client-generated identifier used to correlate the protocol ACK
+    // with the original remote task request.
+    std::optional<QString> requestId;
     std::optional<QString> taskId;
     std::optional<QString> sourceType;
     std::optional<QString> sourceUrl;

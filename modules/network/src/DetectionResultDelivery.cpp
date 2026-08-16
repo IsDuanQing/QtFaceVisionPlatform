@@ -83,10 +83,18 @@ DetectionResultDelivery::DetectionResultDelivery(QObject* parent)
     : QObject(parent),
       config_(),
       socket_(new QTcpSocket(this)),
+      reconnectTimer_(this),
       pendingNetworkMessages_(),
       exportFilePath_(),
       lastError_()
 {
+    reconnectTimer_.setSingleShot(true);
+    reconnectTimer_.setInterval(500);
+    connect(
+        &reconnectTimer_,
+        &QTimer::timeout,
+        this,
+        &DetectionResultDelivery::attemptNetworkReconnect);
     connect(
         socket_,
         &QTcpSocket::connected,
@@ -153,6 +161,7 @@ void DetectionResultDelivery::setConfig(const DetectionDeliverySettings& config)
     {
         pendingNetworkMessages_.clear();
         socket_->abort();
+        stopNetworkReconnect();
     }
 
     lastError_.clear();
@@ -171,6 +180,10 @@ void DetectionResultDelivery::setConfig(const DetectionDeliverySettings& config)
             QStringLiteral("TCP ready: %1:%2")
                 .arg(config_.networkHost)
                 .arg(config_.networkPort));
+        if (!pendingNetworkMessages_.isEmpty())
+        {
+            scheduleNetworkReconnect();
+        }
     }
 }
 
@@ -324,14 +337,10 @@ bool DetectionResultDelivery::enqueueNetworkMessage(const QByteArray& message)
 
     if (socket_->state() == QAbstractSocket::UnconnectedState)
     {
-        socket_->connectToHost(
-            config_.networkHost,
-            static_cast<quint16>(config_.networkPort));
-        setStatus(
-            false,
-            QStringLiteral("Connecting to %1:%2")
-                .arg(config_.networkHost)
-                .arg(config_.networkPort));
+        if (!reconnectTimer_.isActive())
+        {
+            attemptNetworkReconnect();
+        }
     }
     else if (socket_->state() == QAbstractSocket::ConnectedState)
     {
@@ -416,6 +425,10 @@ void DetectionResultDelivery::flushNetworkQueue()
     if (socket_ == nullptr
         || socket_->state() != QAbstractSocket::ConnectedState)
     {
+        if (config_.networkEnabled && !pendingNetworkMessages_.isEmpty())
+        {
+            scheduleNetworkReconnect();
+        }
         return;
     }
 
@@ -443,6 +456,14 @@ void DetectionResultDelivery::flushNetworkQueue()
     }
 
     socket_->flush();
+    if (!pendingNetworkMessages_.isEmpty())
+    {
+        scheduleNetworkReconnect();
+    }
+    else
+    {
+        stopNetworkReconnect();
+    }
 }
 
 void DetectionResultDelivery::handleSocketConnected()
@@ -458,6 +479,10 @@ void DetectionResultDelivery::handleSocketConnected()
 
 void DetectionResultDelivery::handleSocketDisconnected()
 {
+    if (config_.networkEnabled && !pendingNetworkMessages_.isEmpty())
+    {
+        scheduleNetworkReconnect();
+    }
     setStatus(false, QStringLiteral("TCP disconnected"));
 }
 
@@ -466,6 +491,63 @@ void DetectionResultDelivery::handleSocketError(QAbstractSocket::SocketError err
     Q_UNUSED(error);
     lastError_ = socket_->errorString();
     setStatus(false, QStringLiteral("TCP error: %1").arg(lastError_));
+    if (config_.networkEnabled && !pendingNetworkMessages_.isEmpty())
+    {
+        scheduleNetworkReconnect();
+    }
+}
+
+void DetectionResultDelivery::attemptNetworkReconnect()
+{
+    if (!config_.networkEnabled || pendingNetworkMessages_.isEmpty())
+    {
+        stopNetworkReconnect();
+        return;
+    }
+
+    if (socket_->state() == QAbstractSocket::ConnectedState)
+    {
+        flushNetworkQueue();
+        return;
+    }
+
+    if (socket_->state() == QAbstractSocket::ConnectingState)
+    {
+        scheduleNetworkReconnect();
+        return;
+    }
+
+    socket_->connectToHost(
+        config_.networkHost,
+        static_cast<quint16>(config_.networkPort));
+    setStatus(
+        false,
+        QStringLiteral("Connecting to %1:%2")
+            .arg(config_.networkHost)
+            .arg(config_.networkPort));
+    scheduleNetworkReconnect();
+}
+
+void DetectionResultDelivery::scheduleNetworkReconnect()
+{
+    if (!config_.networkEnabled || pendingNetworkMessages_.isEmpty())
+    {
+        stopNetworkReconnect();
+        return;
+    }
+
+    if (!reconnectTimer_.isActive())
+    {
+        reconnectTimer_.start();
+    }
+}
+
+void DetectionResultDelivery::stopNetworkReconnect()
+{
+    if (reconnectTimer_.isActive())
+    {
+        reconnectTimer_.stop();
+    }
 }
 
 void DetectionResultDelivery::setStatus(
