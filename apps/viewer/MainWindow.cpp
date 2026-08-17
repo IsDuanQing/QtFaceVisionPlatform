@@ -2,6 +2,7 @@
 
 #include "DetectionHistoryTableModel.h"
 
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -25,6 +26,8 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QStringList>
+#include <QSizePolicy>
 #include <QTableView>
 #include <QVariant>
 #include <QVBoxLayout>
@@ -47,6 +50,51 @@ QLabel* createMetricValue(const QString& text)
     QLabel* label = new QLabel(text);
     label->setObjectName(QStringLiteral("metricValue"));
     return label;
+}
+
+void setLabelTextIfChanged(QLabel* label, const QString& text)
+{
+    if (label != nullptr && label->text() != text)
+    {
+        label->setText(text);
+    }
+}
+
+QStringList candidateProjectRoots()
+{
+    QStringList bases;
+#if defined(IVP_PROJECT_ROOT)
+    bases << QString::fromUtf8(IVP_PROJECT_ROOT);
+#endif
+    bases << QDir::currentPath();
+    bases << QApplication::applicationDirPath();
+
+    QDir currentDirectory(QDir::currentPath());
+    QDir applicationDirectory(QApplication::applicationDirPath());
+    for (int depth = 0; depth < 4; ++depth)
+    {
+        currentDirectory.cdUp();
+        applicationDirectory.cdUp();
+        bases << currentDirectory.absolutePath();
+        bases << applicationDirectory.absolutePath();
+    }
+
+    bases.removeDuplicates();
+    return bases;
+}
+
+QString projectResourcePath(const QString& relativePath)
+{
+    for (const QString& base : candidateProjectRoots())
+    {
+        const QFileInfo candidate(QDir(base).filePath(relativePath));
+        if (candidate.exists())
+        {
+            return candidate.absoluteFilePath();
+        }
+    }
+
+    return QFileInfo(relativePath).absoluteFilePath();
 }
 
 } // namespace
@@ -75,15 +123,21 @@ MainWindow::MainWindow(QWidget* parent)
       controlStatusLabel_(nullptr),
       historyStatusLabel_(nullptr),
       deliveryStatusLabel_(nullptr),
+      displayedFrameValueLabel_(nullptr),
+      detectedFrameValueLabel_(nullptr),
+      previewLagValueLabel_(nullptr),
+      inferenceFpsValueLabel_(nullptr),
       openButton_(nullptr),
       rtspButton_(nullptr),
       imageSequenceButton_(nullptr),
+      faceDemoButton_(nullptr),
       playPauseButton_(nullptr),
       stopButton_(nullptr),
       historyRefreshButton_(nullptr),
       historyClearButton_(nullptr),
       restoreDefaultsButton_(nullptr),
       applyDetectorButton_(nullptr),
+      facePresetButton_(nullptr),
       clearOverlayButton_(nullptr),
       exportBrowseButton_(nullptr),
       historyModel_(nullptr),
@@ -116,9 +170,15 @@ MainWindow::MainWindow(QWidget* parent)
       networkPublishCheck_(nullptr),
       networkHostEdit_(nullptr),
       networkPortSpinBox_(nullptr),
+      previewModeCombo_(nullptr),
       onnxBrowseButton_(nullptr),
       engineBrowseButton_(nullptr),
       labelsBrowseButton_(nullptr),
+      displayedPreviewFrameIndex_(-1),
+      latestDetectionFrameIndex_(-1),
+      inferenceFpsFrameCount_(0),
+      inferenceFps_(0.0),
+      inferenceFpsTimer_(),
       controlFrameIndex_(0),
       controlPtsMs_(0),
       currentTaskId_(),
@@ -178,6 +238,7 @@ void MainWindow::openVideo()
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading video..."));
     resetDetectionSummary();
+    resetPreviewDebug();
     applyCurrentDetectorConfig();
     applyCurrentDeliveryConfig();
 
@@ -220,6 +281,7 @@ void MainWindow::openRtspStream()
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Connecting to RTSP stream..."));
     resetDetectionSummary();
+    resetPreviewDebug();
     applyCurrentDetectorConfig();
     applyCurrentDeliveryConfig();
 
@@ -235,10 +297,15 @@ void MainWindow::openRtspStream()
 
 void MainWindow::openImageSequence()
 {
+    const QString mot20Directory =
+        projectResourcePath(QStringLiteral("videos/mot20-02/img1"));
+    const QString defaultDirectory = QFileInfo(mot20Directory).exists()
+        ? mot20Directory
+        : QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
     const QString directory = QFileDialog::getExistingDirectory(
         this,
         tr("Open Image Folder"),
-        QStandardPaths::writableLocation(QStandardPaths::PicturesLocation));
+        defaultDirectory);
 
     if (directory.isEmpty())
     {
@@ -249,6 +316,7 @@ void MainWindow::openImageSequence()
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading image sequence..."));
     resetDetectionSummary();
+    resetPreviewDebug();
     applyCurrentDetectorConfig();
     applyCurrentDeliveryConfig();
 
@@ -259,6 +327,51 @@ void MainWindow::openImageSequence()
     {
         fileLabel_->setText(directory);
         startStorageSession(directory);
+        statusValueLabel_->setText(tr("Ready"));
+
+        // Image-folder inspection is closer to "one image, one result" than to
+        // continuous video playback, so prefer the strict synchronized preview.
+        const int detectionPreviewIndex =
+            previewModeCombo_ == nullptr
+                ? -1
+                : previewModeCombo_->findData(static_cast<int>(PreviewMode::Detection));
+        if (detectionPreviewIndex >= 0 && previewModeCombo_->currentIndex() != detectionPreviewIndex)
+        {
+            previewModeCombo_->setCurrentIndex(detectionPreviewIndex);
+        }
+
+        player_.play();
+        syncControlStatus(true);
+    }
+}
+
+void MainWindow::openFaceDemo()
+{
+    applyFaceDetectorPreset();
+
+    const QString videoPath =
+        projectResourcePath(QStringLiteral("videos/face-detection/face-test.mp4"));
+    if (!QFileInfo(videoPath).exists())
+    {
+        QMessageBox::warning(
+            this,
+            tr("Face Demo"),
+            tr("Could not find the bundled face demo video: %1").arg(videoPath));
+        return;
+    }
+
+    finishStorageSession();
+    videoWidget_->clear();
+    videoWidget_->setPlaceholderText(tr("Loading face demo..."));
+    resetDetectionSummary();
+    resetPreviewDebug();
+    applyCurrentDetectorConfig();
+    applyCurrentDeliveryConfig();
+
+    if (player_.open(videoPath))
+    {
+        fileLabel_->setText(videoPath);
+        startStorageSession(videoPath);
         statusValueLabel_->setText(tr("Ready"));
         player_.play();
         syncControlStatus(true);
@@ -289,17 +402,48 @@ void MainWindow::stopVideo()
     positionValueLabel_->setText(QStringLiteral("00:00"));
     videoWidget_->setDetections(ivp::DetectionResults());
     resetDetectionSummary();
+    resetPreviewDebug();
     finishStorageSession();
     syncControlStatus(true);
 }
 
 void MainWindow::displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex)
 {
+    if (isDetectionPreviewMode())
+    {
+        return;
+    }
+
     videoWidget_->setFrame(image, positionMs, frameIndex);
-    positionValueLabel_->setText(formatDuration(positionMs));
+    setLabelTextIfChanged(positionValueLabel_, formatDuration(positionMs));
+    displayedPreviewFrameIndex_ = frameIndex;
     controlFrameIndex_ = frameIndex;
     controlPtsMs_ = positionMs;
-    syncControlStatus(true);
+    updatePreviewDebug();
+    syncControlStatus(false);
+}
+
+void MainWindow::displayDetectionFrame(
+    const QImage& image,
+    const ivp::DetectionResults& results,
+    qint64 frameIndex,
+    qint64 ptsMs,
+    const QString& sourceId)
+{
+    Q_UNUSED(sourceId)
+
+    if (!isDetectionPreviewMode())
+    {
+        return;
+    }
+
+    videoWidget_->setDetectionFrame(image, results, ptsMs, frameIndex);
+    setLabelTextIfChanged(positionValueLabel_, formatDuration(ptsMs));
+    displayedPreviewFrameIndex_ = frameIndex;
+    controlFrameIndex_ = frameIndex;
+    controlPtsMs_ = ptsMs;
+    updatePreviewDebug();
+    syncControlStatus(false);
 }
 
 void MainWindow::displayDetections(
@@ -323,7 +467,14 @@ void MainWindow::displayDetections(
         storageValueLabel_->setText(tr("Error"));
     }
 
-    videoWidget_->setDetections(results);
+    // Detection is produced asynchronously, so the overlay must be bound to
+    // the source frame instead of being painted as a global "latest result".
+    if (!isDetectionPreviewMode())
+    {
+        videoWidget_->setDetections(results, frameIndex, ptsMs);
+    }
+    latestDetectionFrameIndex_ = frameIndex;
+    updateInferenceFps(frameIndex);
     updateDetectionSummary();
     deliverDetectionResults(results, frameIndex, ptsMs, sourceId);
     ivp::DetectionFramePacket packet;
@@ -344,7 +495,11 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
     playPauseButton_->setEnabled(opened);
     stopButton_->setEnabled(opened);
     playPauseButton_->setText(playing ? tr("Pause") : tr("Play"));
-    statusValueLabel_->setText(opened ? (playing ? tr("Playing") : tr("Paused")) : tr("No Video"));
+    statusValueLabel_->setText(opened
+        ? (isDetectionPreviewMode()
+              ? tr("Detection Preview")
+              : (playing ? tr("Playing") : tr("Paused")))
+        : tr("No Video"));
     syncControlStatus(true);
 
     if (!opened)
@@ -360,6 +515,7 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
         audioValueLabel_->setText(QStringLiteral("--"));
         positionValueLabel_->setText(QStringLiteral("00:00"));
         resetDetectionSummary();
+        resetPreviewDebug();
     }
 }
 
@@ -503,6 +659,7 @@ void MainWindow::buildUi()
     openButton_->setObjectName(QStringLiteral("primaryButton"));
     rtspButton_ = new QPushButton(tr("Open RTSP"));
     imageSequenceButton_ = new QPushButton(tr("Open Images"));
+    faceDemoButton_ = new QPushButton(tr("Face Demo"));
     playPauseButton_ = new QPushButton(tr("Play"));
     stopButton_ = new QPushButton(tr("Stop"));
 
@@ -514,6 +671,13 @@ void MainWindow::buildUi()
     detectionValueLabel_ = createMetricValue(QStringLiteral("0 / 0"));
     storageValueLabel_ = createMetricValue(tr("Off"));
     statusValueLabel_ = createMetricValue(tr("No Video"));
+    displayedFrameValueLabel_ = createMetricValue(QStringLiteral("--"));
+    detectedFrameValueLabel_ = createMetricValue(QStringLiteral("--"));
+    previewLagValueLabel_ = createMetricValue(QStringLiteral("--"));
+    inferenceFpsValueLabel_ = createMetricValue(QStringLiteral("--"));
+    previewModeCombo_ = new QComboBox();
+    previewModeCombo_->addItem(tr("Playback Preview"), static_cast<int>(PreviewMode::Playback));
+    previewModeCombo_->addItem(tr("Detection Preview"), static_cast<int>(PreviewMode::Detection));
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     headerLayout->addWidget(titleLabel_);
@@ -521,34 +685,41 @@ void MainWindow::buildUi()
     headerLayout->addWidget(openButton_);
     headerLayout->addWidget(rtspButton_);
     headerLayout->addWidget(imageSequenceButton_);
+    headerLayout->addWidget(faceDemoButton_);
     headerLayout->addWidget(playPauseButton_);
     headerLayout->addWidget(stopButton_);
 
     QFrame* infoPanel = new QFrame();
     infoPanel->setObjectName(QStringLiteral("infoPanel"));
 
-    QHBoxLayout* metricsLayout = new QHBoxLayout(infoPanel);
+    QGridLayout* metricsLayout = new QGridLayout(infoPanel);
     metricsLayout->setContentsMargins(18, 14, 18, 14);
-    metricsLayout->setSpacing(22);
-    metricsLayout->addWidget(createMetricLabel(tr("Resolution")));
-    metricsLayout->addWidget(resolutionValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("FPS")));
-    metricsLayout->addWidget(fpsValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("Duration")));
-    metricsLayout->addWidget(durationValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("Audio")));
-    metricsLayout->addWidget(audioValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("Position")));
-    metricsLayout->addWidget(positionValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("Detections")));
-    metricsLayout->addWidget(detectionValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("Storage")));
-    metricsLayout->addWidget(storageValueLabel_);
-    metricsLayout->addWidget(createMetricLabel(tr("Status")));
-    metricsLayout->addWidget(statusValueLabel_);
-    metricsLayout->addStretch();
+    metricsLayout->setHorizontalSpacing(16);
+    metricsLayout->setVerticalSpacing(8);
+    const auto addMetric = [metricsLayout](int row, int pair, const QString& label, QWidget* value) {
+        const int column = pair * 2;
+        metricsLayout->addWidget(createMetricLabel(label), row, column);
+        metricsLayout->addWidget(value, row, column + 1);
+        metricsLayout->setColumnStretch(column + 1, 1);
+    };
+    addMetric(0, 0, tr("Resolution"), resolutionValueLabel_);
+    addMetric(0, 1, tr("FPS"), fpsValueLabel_);
+    addMetric(0, 2, tr("Duration"), durationValueLabel_);
+    addMetric(0, 3, tr("Audio"), audioValueLabel_);
+    addMetric(0, 4, tr("Position"), positionValueLabel_);
+    addMetric(0, 5, tr("Preview"), previewModeCombo_);
+    addMetric(1, 0, tr("Shown"), displayedFrameValueLabel_);
+    addMetric(1, 1, tr("Infer"), detectedFrameValueLabel_);
+    addMetric(1, 2, tr("Lag"), previewLagValueLabel_);
+    addMetric(1, 3, tr("Infer FPS"), inferenceFpsValueLabel_);
+    addMetric(1, 4, tr("Detections"), detectionValueLabel_);
+    addMetric(1, 5, tr("Status"), statusValueLabel_);
+    addMetric(2, 0, tr("Storage"), storageValueLabel_);
 
     QWidget* livePanel = new QWidget();
+    livePanel->setMinimumHeight(300);
+    livePanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
     QVBoxLayout* liveLayout = new QVBoxLayout(livePanel);
     liveLayout->setContentsMargins(0, 0, 0, 0);
     liveLayout->setSpacing(12);
@@ -558,6 +729,9 @@ void MainWindow::buildUi()
 
     QSplitter* bottomSplitter = new QSplitter(Qt::Horizontal);
     bottomSplitter->setObjectName(QStringLiteral("bottomSplitter"));
+    bottomSplitter->setMinimumHeight(120);
+    bottomSplitter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    bottomSplitter->setChildrenCollapsible(true);
     bottomSplitter->addWidget(createSettingsPanel());
     bottomSplitter->addWidget(createHistoryPanel());
     bottomSplitter->setStretchFactor(0, 1);
@@ -566,11 +740,17 @@ void MainWindow::buildUi()
 
     QSplitter* bodySplitter = new QSplitter(Qt::Vertical);
     bodySplitter->setObjectName(QStringLiteral("bodySplitter"));
+    bodySplitter->setChildrenCollapsible(true);
+    bodySplitter->setHandleWidth(8);
     bodySplitter->addWidget(livePanel);
     bodySplitter->addWidget(bottomSplitter);
-    bodySplitter->setStretchFactor(0, 3);
-    bodySplitter->setStretchFactor(1, 2);
-    bodySplitter->setSizes(QList<int>() << 560 << 260);
+    bodySplitter->setCollapsible(0, false);
+    bodySplitter->setCollapsible(1, true);
+    // Give automatic relayouts to the preview first; users can still drag the
+    // lower panel taller when they are querying parameters or history.
+    bodySplitter->setStretchFactor(0, 1);
+    bodySplitter->setStretchFactor(1, 0);
+    bodySplitter->setSizes(QList<int>() << 660 << 180);
 
     QVBoxLayout* mainLayout = new QVBoxLayout(centralWidget);
     mainLayout->setContentsMargins(24, 20, 24, 24);
@@ -638,6 +818,7 @@ QWidget* MainWindow::createSettingsPanel()
     engineBrowseButton_ = new QPushButton(tr("..."), panel);
     labelsBrowseButton_ = new QPushButton(tr("..."), panel);
     applyDetectorButton_ = new QPushButton(tr("Apply Parameters"), panel);
+    facePresetButton_ = new QPushButton(tr("Face Preset"), panel);
     clearOverlayButton_ = new QPushButton(tr("Clear Overlay"), panel);
     restoreDefaultsButton_ = new QPushButton(tr("Restore Defaults"), panel);
     exportResultsCheck_ = new QCheckBox(tr("Export results"), panel);
@@ -718,6 +899,7 @@ QWidget* MainWindow::createSettingsPanel()
     settingsActionsLayout->setContentsMargins(0, 0, 0, 0);
     settingsActionsLayout->setSpacing(10);
     settingsActionsLayout->addWidget(applyDetectorButton_);
+    settingsActionsLayout->addWidget(facePresetButton_);
     settingsActionsLayout->addWidget(clearOverlayButton_);
     settingsActionsLayout->addStretch();
     settingsActionsLayout->addWidget(restoreDefaultsButton_);
@@ -728,7 +910,10 @@ QWidget* MainWindow::createSettingsPanel()
     scrollArea->setObjectName(QStringLiteral("settingsScrollArea"));
     scrollArea->setFrameShape(QFrame::NoFrame);
     scrollArea->setWidgetResizable(true);
+    scrollArea->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scrollArea->setMinimumHeight(80);
+    scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     scrollArea->setWidget(panel);
     return scrollArea;
 }
@@ -750,7 +935,8 @@ QWidget* MainWindow::createHistoryPanel()
     historyTableView_->horizontalHeader()->setStretchLastSection(true);
     historyTableView_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     historyTableView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    historyTableView_->setMinimumHeight(220);
+    historyTableView_->setMinimumHeight(90);
+    historyTableView_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     historySessionCombo_ = new QComboBox(panel);
     historySessionCombo_->setMinimumWidth(240);
@@ -979,6 +1165,7 @@ void MainWindow::connectSignals()
     connect(openButton_, &QPushButton::clicked, this, &MainWindow::openVideo);
     connect(rtspButton_, &QPushButton::clicked, this, &MainWindow::openRtspStream);
     connect(imageSequenceButton_, &QPushButton::clicked, this, &MainWindow::openImageSequence);
+    connect(faceDemoButton_, &QPushButton::clicked, this, &MainWindow::openFaceDemo);
     connect(playPauseButton_, &QPushButton::clicked, this, &MainWindow::togglePlayPause);
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopVideo);
     connect(historyRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshHistory);
@@ -988,8 +1175,14 @@ void MainWindow::connectSignals()
     connect(labelsBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseLabelsPath);
     connect(exportBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseExportDirectory);
     connect(applyDetectorButton_, &QPushButton::clicked, this, &MainWindow::applyDetectorSettings);
+    connect(facePresetButton_, &QPushButton::clicked, this, &MainWindow::applyFaceDetectorPreset);
     connect(clearOverlayButton_, &QPushButton::clicked, this, &MainWindow::clearDetectionOverlay);
     connect(restoreDefaultsButton_, &QPushButton::clicked, this, &MainWindow::restoreDefaultSettings);
+    connect(
+        previewModeCombo_,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        &MainWindow::updatePreviewMode);
     connect(
         detectorBackendCombo_,
         QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1006,6 +1199,7 @@ void MainWindow::connectSignals()
         &MainWindow::refreshHistory);
 
     connect(&player_, &VideoPlayer::frameReady, this, &MainWindow::displayFrame);
+    connect(&player_, &VideoPlayer::detectionFrameReady, this, &MainWindow::displayDetectionFrame);
     connect(&player_, &VideoPlayer::detectionResultsReady, this, &MainWindow::displayDetections);
     connect(&player_, &VideoPlayer::stateChanged, this, &MainWindow::updatePlayerState);
     connect(&player_, &VideoPlayer::videoInfoChanged, this, &MainWindow::updateVideoInfo);
@@ -1612,6 +1806,57 @@ void MainWindow::applyDetectorSettings()
         : tr("Parameters Ready"));
 }
 
+void MainWindow::applyFaceDetectorPreset()
+{
+    if (detectorBackendCombo_ != nullptr)
+    {
+        const int index = detectorBackendCombo_->findData(
+            static_cast<int>(ivp::DetectorBackend::OpenCVDnn));
+        detectorBackendCombo_->setCurrentIndex(index >= 0 ? index : 0);
+    }
+    if (confidenceSpinBox_ != nullptr)
+    {
+        confidenceSpinBox_->setValue(0.25);
+    }
+    if (nmsSpinBox_ != nullptr)
+    {
+        nmsSpinBox_->setValue(0.45);
+    }
+    if (maxDetectionsSpinBox_ != nullptr)
+    {
+        maxDetectionsSpinBox_->setValue(300);
+    }
+    if (inputWidthSpinBox_ != nullptr)
+    {
+        inputWidthSpinBox_->setValue(640);
+    }
+    if (inputHeightSpinBox_ != nullptr)
+    {
+        inputHeightSpinBox_->setValue(640);
+    }
+    if (classCountSpinBox_ != nullptr)
+    {
+        classCountSpinBox_->setValue(1);
+    }
+    if (detectEverySpinBox_ != nullptr)
+    {
+        detectEverySpinBox_->setValue(1);
+    }
+    if (onnxPathEdit_ != nullptr)
+    {
+        onnxPathEdit_->setText(
+            projectResourcePath(QStringLiteral("models/yolov8-face/face.onnx")));
+    }
+    if (labelsPathEdit_ != nullptr)
+    {
+        labelsPathEdit_->setText(
+            projectResourcePath(QStringLiteral("models/yolov8-face/labels.txt")));
+    }
+
+    updateDetectorParameterState();
+    applyDetectorSettings();
+}
+
 void MainWindow::clearDetectionOverlay()
 {
     videoWidget_->setDetections(ivp::DetectionResults());
@@ -1691,6 +1936,25 @@ void MainWindow::updateDetectorParameterState()
     {
         mockDelaySpinBox_->setEnabled(!useRealYolo);
     }
+}
+
+void MainWindow::updatePreviewMode()
+{
+    videoWidget_->clear();
+    videoWidget_->setPlaceholderText(isDetectionPreviewMode()
+        ? tr("Waiting for a frame completed by inference...")
+        : tr("Waiting for playback frame..."));
+    displayedPreviewFrameIndex_ = -1;
+    updatePreviewDebug();
+
+    if (player_.isOpened())
+    {
+        statusValueLabel_->setText(isDetectionPreviewMode()
+            ? tr("Detection Preview")
+            : (player_.isPlaying() ? tr("Playing") : tr("Paused")));
+    }
+
+    syncControlStatus(true);
 }
 
 void MainWindow::updateDeliveryStatus(bool connected, const QString& message)
@@ -1883,6 +2147,90 @@ void MainWindow::resetDetectionSummary()
     }
 }
 
+MainWindow::PreviewMode MainWindow::currentPreviewMode() const
+{
+    if (previewModeCombo_ == nullptr)
+    {
+        return PreviewMode::Playback;
+    }
+
+    return static_cast<PreviewMode>(previewModeCombo_->currentData().toInt());
+}
+
+bool MainWindow::isDetectionPreviewMode() const
+{
+    return currentPreviewMode() == PreviewMode::Detection;
+}
+
+void MainWindow::resetPreviewDebug()
+{
+    displayedPreviewFrameIndex_ = -1;
+    latestDetectionFrameIndex_ = -1;
+    inferenceFpsFrameCount_ = 0;
+    inferenceFps_ = 0.0;
+    inferenceFpsTimer_.invalidate();
+    updatePreviewDebug();
+}
+
+void MainWindow::updatePreviewDebug()
+{
+    if (displayedFrameValueLabel_ != nullptr)
+    {
+        setLabelTextIfChanged(
+            displayedFrameValueLabel_,
+            displayedPreviewFrameIndex_ >= 0
+                ? QString::number(displayedPreviewFrameIndex_)
+                : QStringLiteral("--"));
+    }
+    if (detectedFrameValueLabel_ != nullptr)
+    {
+        setLabelTextIfChanged(
+            detectedFrameValueLabel_,
+            latestDetectionFrameIndex_ >= 0
+                ? QString::number(latestDetectionFrameIndex_)
+                : QStringLiteral("--"));
+    }
+    if (previewLagValueLabel_ != nullptr)
+    {
+        setLabelTextIfChanged(
+            previewLagValueLabel_,
+            displayedPreviewFrameIndex_ >= 0 && latestDetectionFrameIndex_ >= 0
+                ? QString::number(displayedPreviewFrameIndex_ - latestDetectionFrameIndex_)
+                : QStringLiteral("--"));
+    }
+    if (inferenceFpsValueLabel_ != nullptr)
+    {
+        setLabelTextIfChanged(
+            inferenceFpsValueLabel_,
+            inferenceFps_ > 0.0
+                ? QStringLiteral("%1").arg(inferenceFps_, 0, 'f', 1)
+                : QStringLiteral("--"));
+    }
+}
+
+void MainWindow::updateInferenceFps(qint64 frameIndex)
+{
+    latestDetectionFrameIndex_ = frameIndex;
+    if (!inferenceFpsTimer_.isValid())
+    {
+        inferenceFpsTimer_.start();
+        inferenceFpsFrameCount_ = 0;
+    }
+
+    ++inferenceFpsFrameCount_;
+    const qint64 elapsedMs = inferenceFpsTimer_.elapsed();
+    if (elapsedMs >= 500)
+    {
+        inferenceFps_ =
+            static_cast<double>(inferenceFpsFrameCount_) * 1000.0
+            / static_cast<double>(elapsedMs);
+        inferenceFpsFrameCount_ = 0;
+        inferenceFpsTimer_.restart();
+    }
+
+    updatePreviewDebug();
+}
+
 void MainWindow::updateDetectionSummary()
 {
     const ivp::DetectionSummary summary = resultManager_.summary();
@@ -1928,13 +2276,15 @@ void MainWindow::syncControlStatus(bool publish)
     status.audioSampleRate = controlAudioSampleRate_;
     status.audioChannels = controlAudioChannels_;
     status.message = status.opened
-        ? (status.playing ? tr("Playing") : tr("Paused"))
+        ? (isDetectionPreviewMode()
+              ? tr("Detection Preview")
+              : (status.playing ? tr("Playing") : tr("Paused")))
         : tr("No input");
 
     controlServer_.setStatusSnapshot(status);
     if (controlStatusLabel_ != nullptr)
     {
-        controlStatusLabel_->setText(formatControlStatus(status));
+        setLabelTextIfChanged(controlStatusLabel_, formatControlStatus(status));
     }
 
     if (publish)

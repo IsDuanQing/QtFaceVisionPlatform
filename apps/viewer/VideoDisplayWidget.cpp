@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 
 #include <QColor>
 #include <QFontMetrics>
@@ -14,7 +16,8 @@
 namespace
 {
 
-constexpr qint64 kMaxDetectionFrameLag = 30;
+constexpr qint64 kMaxDetectionCacheFrameAge = 180;
+constexpr std::size_t kMaxCachedDetectionFrames = 240;
 
 QColor frameBackgroundColor()
 {
@@ -33,7 +36,7 @@ QColor detectionColor()
 
 QColor detectionTextBackgroundColor()
 {
-    return QColor(25, 43, 36);
+    return QColor(25, 43, 36, 170);
 }
 
 QColor detectionTextColor()
@@ -46,16 +49,30 @@ QColor detectionTextColor()
 VideoDisplayWidget::VideoDisplayWidget(QWidget* parent)
     : QWidget(parent),
       currentFrame_(),
-      detections_(),
+      detectionFrames_(),
+      visibleDetections_(),
       placeholderText_(QStringLiteral("Open a video or RTSP stream to start inspection preview")),
       currentPositionMs_(0),
       currentFrameIndex_(-1)
 {
     setObjectName(QStringLiteral("videoSurface"));
-    setMinimumSize(860, 520);
+    setMinimumSize(minimumSizeHint());
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setAutoFillBackground(false);
+}
+
+QSize VideoDisplayWidget::sizeHint() const
+{
+    // Keep the layout hint independent from the current frame resolution.
+    // Otherwise high-resolution image sequences can make the splitter fight
+    // the user's manually adjusted panel sizes during playback.
+    return QSize(960, 540);
+}
+
+QSize VideoDisplayWidget::minimumSizeHint() const
+{
+    return QSize(360, 220);
 }
 
 void VideoDisplayWidget::setFrame(const QImage& frame, qint64 positionMs, qint64 frameIndex)
@@ -63,19 +80,75 @@ void VideoDisplayWidget::setFrame(const QImage& frame, qint64 positionMs, qint64
     currentFrame_ = frame;
     currentPositionMs_ = positionMs;
     currentFrameIndex_ = frameIndex;
+    pruneDetectionCache();
+    updateVisibleDetections();
+    update();
+}
+
+void VideoDisplayWidget::setDetectionFrame(
+    const QImage& frame,
+    const ivp::DetectionResults& detections,
+    qint64 positionMs,
+    qint64 frameIndex)
+{
+    currentFrame_ = frame;
+    currentPositionMs_ = positionMs;
+    currentFrameIndex_ = frameIndex;
+
+    // Detection Preview receives an already matched frame/result pair, so it
+    // bypasses the playback overlay cache completely.
+    detectionFrames_.clear();
+    visibleDetections_ = detections;
     update();
 }
 
 void VideoDisplayWidget::setDetections(const ivp::DetectionResults& detections)
 {
-    detections_ = detections;
+    detectionFrames_.clear();
+    visibleDetections_ = detections;
+    update();
+}
+
+void VideoDisplayWidget::setDetections(
+    const ivp::DetectionResults& detections,
+    qint64 frameIndex,
+    qint64 ptsMs)
+{
+    DetectionFrameOverlay overlay;
+    overlay.frameIndex = frameIndex;
+    overlay.ptsMs = ptsMs;
+    overlay.results = detections;
+
+    const auto sameFrame = [frameIndex](const DetectionFrameOverlay& candidate) {
+        return candidate.frameIndex == frameIndex;
+    };
+    const auto existing = std::find_if(detectionFrames_.begin(), detectionFrames_.end(), sameFrame);
+    if (existing != detectionFrames_.end())
+    {
+        *existing = std::move(overlay);
+    }
+    else
+    {
+        const auto insertPosition = std::upper_bound(
+            detectionFrames_.begin(),
+            detectionFrames_.end(),
+            frameIndex,
+            [](qint64 value, const DetectionFrameOverlay& candidate) {
+                return value < candidate.frameIndex;
+            });
+        detectionFrames_.insert(insertPosition, std::move(overlay));
+    }
+
+    pruneDetectionCache();
+    updateVisibleDetections();
     update();
 }
 
 void VideoDisplayWidget::clear()
 {
     currentFrame_ = QImage();
-    detections_.clear();
+    detectionFrames_.clear();
+    visibleDetections_.clear();
     currentPositionMs_ = 0;
     currentFrameIndex_ = -1;
     update();
@@ -186,7 +259,7 @@ void VideoDisplayWidget::drawPlaceholder(QPainter& painter) const
 
 void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetRect) const
 {
-    if (detections_.empty())
+    if (visibleDetections_.empty())
     {
         return;
     }
@@ -198,19 +271,16 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
 
     const QFontMetrics metrics(painter.font());
 
-    for (const ivp::DetectionResult& result : detections_)
+    for (const ivp::DetectionResult& result : visibleDetections_)
     {
-        if (!shouldDrawDetection(result))
-        {
-            continue;
-        }
-
         const QRectF boxRect = scaledDetectionRect(result.box, targetRect);
         if (!boxRect.isValid())
         {
             continue;
         }
 
+        painter.setPen(boxPen);
+        painter.setBrush(Qt::NoBrush);
         painter.drawRect(boxRect);
 
         const QString className = result.className.empty()
@@ -241,21 +311,83 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
         painter.drawRoundedRect(labelRect, 3.0, 3.0);
         painter.setPen(detectionTextColor());
         painter.drawText(labelRect.adjusted(7.0, 0.0, -7.0, 0.0), Qt::AlignVCenter | Qt::AlignLeft, labelText);
+        painter.setBrush(Qt::NoBrush);
         painter.setPen(boxPen);
     }
 }
 
-bool VideoDisplayWidget::shouldDrawDetection(const ivp::DetectionResult& result) const
+void VideoDisplayWidget::updateVisibleDetections()
 {
-    if (currentFrameIndex_ < 0)
+    visibleDetections_.clear();
+
+    if (currentFrameIndex_ < 0 || detectionFrames_.empty())
     {
-        return true;
+        return;
     }
 
-    if (result.frameIndex > currentFrameIndex_)
+    const DetectionFrameOverlay* bestOverlay = nullptr;
+    qint64 bestDistance = std::numeric_limits<qint64>::max();
+    for (const DetectionFrameOverlay& overlay : detectionFrames_)
+    {
+        if (!isDetectionFrameAligned(overlay))
+        {
+            continue;
+        }
+
+        const qint64 frameDistance = std::llabs(currentFrameIndex_ - overlay.frameIndex);
+        if (frameDistance < bestDistance)
+        {
+            bestDistance = frameDistance;
+            bestOverlay = &overlay;
+        }
+    }
+
+    if (bestOverlay != nullptr)
+    {
+        visibleDetections_ = bestOverlay->results;
+    }
+}
+
+bool VideoDisplayWidget::isDetectionFrameAligned(const DetectionFrameOverlay& overlay) const
+{
+    if (currentFrameIndex_ < 0 || overlay.frameIndex < 0)
     {
         return false;
     }
 
-    return currentFrameIndex_ - result.frameIndex <= kMaxDetectionFrameLag;
+    // A detection result must belong to the frame currently being painted.
+    // Reusing a previous frame's boxes creates a false visual result for
+    // image-sequence inspection.
+    if (overlay.frameIndex != currentFrameIndex_)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void VideoDisplayWidget::pruneDetectionCache()
+{
+    while (detectionFrames_.size() > kMaxCachedDetectionFrames)
+    {
+        detectionFrames_.pop_front();
+    }
+
+    if (currentFrameIndex_ < 0)
+    {
+        return;
+    }
+
+    while (!detectionFrames_.empty())
+    {
+        const DetectionFrameOverlay& oldest = detectionFrames_.front();
+        const bool tooOldByFrame =
+            oldest.frameIndex >= 0 && currentFrameIndex_ - oldest.frameIndex > kMaxDetectionCacheFrameAge;
+        if (!tooOldByFrame)
+        {
+            break;
+        }
+
+        detectionFrames_.pop_front();
+    }
 }

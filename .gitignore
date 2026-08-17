@@ -17,8 +17,27 @@ models/**/*.onnx
 models/**/*.engine
 models/**/*.plan
 models/**/*.trt
+models/yolov8-face/
+
+# Large local video/image-sequence test assets.
+.download-cache/
+videos/
+
+# Local notes and screenshots
+docs/
 
 # Runtime data
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+*.jsonl
+*.csv
+logs/
+exports/
+
+# Local scratch files
+*.log
+*.tmp
+tools/download_mot20_02.ps1

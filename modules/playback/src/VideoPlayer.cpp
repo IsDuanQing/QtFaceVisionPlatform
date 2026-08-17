@@ -211,16 +211,15 @@ VideoPlayer::VideoPlayer(QObject* parent)
       producerError_(),
       sourceType_(VideoSourceType::File),
       fallbackClockBaseMs_(0),
-      firstVideoPtsMs_(0),
       pendingFramePositionMs_(0),
       lastVideoPositionMs_(0),
       producerStopRequested_(false),
       producerFinished_(false),
       inferenceStopRequested_(false),
+      playbackGeneration_(0),
       hasAudio_(false),
       opened_(false),
       playing_(false),
-      firstVideoPtsReady_(false),
       framePending_(false)
 {
     qRegisterMetaType<ivp::DetectionResults>("ivp::DetectionResults");
@@ -411,6 +410,7 @@ void VideoPlayer::play()
         return;
     }
 
+    playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
     playing_ = true;
     fallbackClock_.restart();
     if (hasAudio_)
@@ -430,6 +430,7 @@ void VideoPlayer::pause()
     }
 
     frameTimer_.stop();
+    playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
     fallbackClockBaseMs_ = masterClockMs();
     if (hasAudio_)
     {
@@ -443,6 +444,7 @@ void VideoPlayer::pause()
 void VideoPlayer::stop()
 {
     frameTimer_.stop();
+    playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
     if (hasAudio_)
     {
         audioPlayer_.stop();
@@ -536,7 +538,7 @@ void VideoPlayer::consumeFileFrame()
             return;
         }
 
-        pendingFramePositionMs_ = normalizedFramePositionMs(*pendingFrame_);
+        pendingFramePositionMs_ = framePositionMs(*pendingFrame_);
         framePending_ = true;
     }
 
@@ -598,7 +600,7 @@ void VideoPlayer::consumeRtspFrame()
         return;
     }
 
-    const qint64 positionMs = normalizedFramePositionMs(*latestFrame);
+    const qint64 positionMs = framePositionMs(*latestFrame);
     const qint64 frameIndex = latestFrame->metadata.frameIndex;
     const QImage image = convertFrameToImage(std::move(latestFrame));
     if (!image.isNull())
@@ -640,17 +642,9 @@ qint64 VideoPlayer::masterClockMs() const
     return fallbackClockBaseMs_;
 }
 
-qint64 VideoPlayer::normalizedFramePositionMs(const ivp::VideoFrame& frame)
+qint64 VideoPlayer::framePositionMs(const ivp::VideoFrame& frame) const
 {
-    const qint64 rawPositionMs = frame.metadata.ptsMs;
-
-    if (!firstVideoPtsReady_)
-    {
-        firstVideoPtsMs_ = rawPositionMs;
-        firstVideoPtsReady_ = true;
-    }
-
-    return std::max<qint64>(0, rawPositionMs - firstVideoPtsMs_);
+    return std::max<qint64>(0, frame.metadata.ptsMs);
 }
 
 QImage VideoPlayer::convertFrameToImage(ivp::VideoFramePtr frame) const
@@ -800,11 +794,23 @@ void VideoPlayer::stopProducerThread()
 
 void VideoPlayer::producerLoop()
 {
+    bool firstInputPtsReady = false;
+    qint64 firstInputPtsMs = 0;
+
     while (!producerStopRequested_.load())
     {
         ivp::VideoFrame frame;
         if (readNextInputFrame(&frame))
         {
+            if (!firstInputPtsReady)
+            {
+                firstInputPtsMs = frame.metadata.ptsMs;
+                firstInputPtsReady = true;
+            }
+            frame.metadata.ptsMs = std::max<qint64>(
+                0,
+                frame.metadata.ptsMs - firstInputPtsMs);
+
             const ivp::FrameQueuePolicy displayPolicy = sourceType_ == VideoSourceType::Rtsp
                 ? ivp::FrameQueuePolicy::DropOldest
                 : ivp::FrameQueuePolicy::BlockWhenFull;
@@ -871,6 +877,8 @@ void VideoPlayer::inferenceLoop()
         const qint64 frameIndex = frame->metadata.frameIndex;
         const qint64 ptsMs = frame->metadata.ptsMs;
         const QString sourceId = QString::fromStdString(frame->metadata.sourceId);
+        const std::uint64_t playbackGeneration =
+            playbackGeneration_.load(std::memory_order_relaxed);
         ivp::DetectionResults results;
         std::string detectorError;
         std::string detectorName;
@@ -898,11 +906,35 @@ void VideoPlayer::inferenceLoop()
         ++consumedFrames;
         detectedObjects += static_cast<qint64>(results.size());
 
-        // The inference thread never touches UI objects directly.
+        const QImage detectionImage = convertFrameToImage(frame);
+
+        // The inference thread never touches UI objects directly. The normal
+        // result signal feeds storage/networking, while detectionFrameReady is
+        // reserved for a frame-accurate preview mode.
         QMetaObject::invokeMethod(
             this,
-            [this, results = std::move(results), frameIndex, ptsMs, sourceId]() {
+            [this,
+             detectionImage,
+             results = std::move(results),
+             frameIndex,
+             ptsMs,
+             sourceId,
+             playbackGeneration]() {
+                if (!playing_
+                    || playbackGeneration != playbackGeneration_.load(std::memory_order_relaxed))
+                {
+                    return;
+                }
                 emit detectionResultsReady(results, frameIndex, ptsMs, sourceId);
+                if (!detectionImage.isNull())
+                {
+                    emit detectionFrameReady(
+                        detectionImage,
+                        results,
+                        frameIndex,
+                        ptsMs,
+                        sourceId);
+                }
             },
             Qt::QueuedConnection);
 
@@ -1027,10 +1059,8 @@ void VideoPlayer::resetSyncState()
     frameTimer_.stop();
     fallbackClock_.invalidate();
     fallbackClockBaseMs_ = 0;
-    firstVideoPtsMs_ = 0;
     pendingFramePositionMs_ = 0;
     lastVideoPositionMs_ = 0;
-    firstVideoPtsReady_ = false;
     framePending_ = false;
     pendingFrame_.reset();
 }

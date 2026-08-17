@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <QElapsedTimer>
 #include <QImage>
@@ -54,6 +55,12 @@ public:
 
 signals:
     void frameReady(const QImage& image, qint64 positionMs, qint64 frameIndex);
+    void detectionFrameReady(
+        const QImage& image,
+        const ivp::DetectionResults& results,
+        qint64 frameIndex,
+        qint64 ptsMs,
+        const QString& sourceId);
     void detectionResultsReady(
         const ivp::DetectionResults& results,
         qint64 frameIndex,
@@ -79,7 +86,7 @@ private:
 
     int playbackIntervalMs() const;
     qint64 masterClockMs() const;
-    qint64 normalizedFramePositionMs(const ivp::VideoFrame& frame);
+    qint64 framePositionMs(const ivp::VideoFrame& frame) const;
     QImage convertFrameToImage(ivp::VideoFramePtr frame) const;
     void consumeFileFrame();
     void consumeRtspFrame();
@@ -122,16 +129,15 @@ private:
     QString producerError_;
     VideoSourceType sourceType_;
     qint64 fallbackClockBaseMs_;
-    qint64 firstVideoPtsMs_; // 第一帧时间戳，用来做时间归零
     qint64 pendingFramePositionMs_;
     qint64 lastVideoPositionMs_;
     std::atomic<bool> producerStopRequested_; // 原子变量，控制线程启停
     std::atomic<bool> producerFinished_; // 解码线程是否读取完毕视频末尾
     std::atomic<bool> inferenceStopRequested_;
+    std::atomic<std::uint64_t> playbackGeneration_;
     bool hasAudio_; // 是否存在音频流
     bool opened_; // 是否视频源打开
     bool playing_; // 是否正常播放
-    bool firstVideoPtsReady_;
     bool framePending_;
 };
 

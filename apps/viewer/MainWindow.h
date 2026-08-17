@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QLabel>
 #include <QMainWindow>
@@ -39,9 +40,16 @@ private slots:
     void openVideo();
     void openRtspStream();
     void openImageSequence();
+    void openFaceDemo();
     void togglePlayPause();
     void stopVideo();
     void displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex);
+    void displayDetectionFrame(
+        const QImage& image,
+        const ivp::DetectionResults& results,
+        qint64 frameIndex,
+        qint64 ptsMs,
+        const QString& sourceId);
     void displayDetections(
         const ivp::DetectionResults& results,
         qint64 frameIndex,
@@ -58,12 +66,20 @@ private slots:
     void browseLabelsPath();
     void browseExportDirectory();
     void applyDetectorSettings();
+    void applyFaceDetectorPreset();
     void clearDetectionOverlay();
     void restoreDefaultSettings();
     void updateDeliveryStatus(bool connected, const QString& message);
     void updateDetectorParameterState();
+    void updatePreviewMode();
 
 private:
+    enum class PreviewMode
+    {
+        Playback = 0,
+        Detection = 1
+    };
+
     void buildUi();
     void applyStyle();
     void connectSignals();
@@ -94,6 +110,11 @@ private:
     ivp::DetectionHistoryQuery collectHistoryQuery() const;
     void resetDetectionSummary();
     void updateDetectionSummary();
+    PreviewMode currentPreviewMode() const;
+    bool isDetectionPreviewMode() const;
+    void resetPreviewDebug();
+    void updatePreviewDebug();
+    void updateInferenceFps(qint64 frameIndex);
     void syncControlStatus(bool publish = false);
     QString formatControlStatus(const ivp::DetectionControlStatus& status) const;
     QString formatDuration(qint64 milliseconds) const;
@@ -122,16 +143,22 @@ private:
     QLabel* controlStatusLabel_;
     QLabel* historyStatusLabel_;
     QLabel* deliveryStatusLabel_;
+    QLabel* displayedFrameValueLabel_;
+    QLabel* detectedFrameValueLabel_;
+    QLabel* previewLagValueLabel_;
+    QLabel* inferenceFpsValueLabel_;
 
     QPushButton* openButton_;
     QPushButton* rtspButton_;
     QPushButton* imageSequenceButton_;
+    QPushButton* faceDemoButton_;
     QPushButton* playPauseButton_;
     QPushButton* stopButton_;
     QPushButton* historyRefreshButton_;
     QPushButton* historyClearButton_;
     QPushButton* restoreDefaultsButton_;
     QPushButton* applyDetectorButton_;
+    QPushButton* facePresetButton_;
     QPushButton* clearOverlayButton_;
     QPushButton* exportBrowseButton_;
 
@@ -166,9 +193,16 @@ private:
     QCheckBox* networkPublishCheck_;
     QLineEdit* networkHostEdit_;
     QSpinBox* networkPortSpinBox_;
+    QComboBox* previewModeCombo_;
     QPushButton* onnxBrowseButton_;
     QPushButton* engineBrowseButton_;
     QPushButton* labelsBrowseButton_;
+
+    qint64 displayedPreviewFrameIndex_;
+    qint64 latestDetectionFrameIndex_;
+    qint64 inferenceFpsFrameCount_;
+    double inferenceFps_;
+    QElapsedTimer inferenceFpsTimer_;
 
     qint64 controlFrameIndex_;
     qint64 controlPtsMs_;
