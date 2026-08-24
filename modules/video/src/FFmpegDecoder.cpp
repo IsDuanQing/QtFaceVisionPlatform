@@ -34,15 +34,13 @@ namespace
     // 枚举转字符串
     const char* sourceTypeName(VideoSourceType sourceType)
     {
-        switch (sourceType)
-        {
-        case VideoSourceType::File:
-            return "file";
-        case VideoSourceType::Rtsp:
-            return "rtsp";
-        case VideoSourceType::ImageSequence:
-            return "image_sequence";
-        }
+    switch (sourceType)
+    {
+    case VideoSourceType::File:
+        return "file";
+    case VideoSourceType::Rtsp:
+        return "rtsp";
+    }
 
         return "unknown";
     }
@@ -87,12 +85,6 @@ bool FFmpegDecoder::open(const VideoInputConfig& config)
         lastError_ = QStringLiteral("The video input URL is empty.");
         return false;
     }
-    if (config.sourceType == VideoSourceType::ImageSequence)
-    {
-        lastError_ = QStringLiteral("Image sequence input is handled by ImageSequenceReader.");
-        return false;
-    }
-
     if (decodedFrame_ == nullptr)
     {
         decodedFrame_ = av_frame_alloc();

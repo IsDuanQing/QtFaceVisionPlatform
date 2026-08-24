@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "common/FaceRecognitionResult.h"
+
 namespace ivp
 {
 
@@ -25,6 +27,7 @@ struct DetectionResult
     std::string className;
     float confidence = 0.0F;
     BoundingBox box;
+    FaceRecognitionResult face;
 };
 
 using DetectionResults = std::vector<DetectionResult>;

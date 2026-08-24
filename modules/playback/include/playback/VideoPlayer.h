@@ -14,16 +14,18 @@
 #include <mutex>
 #include <thread>
 
-#include "audio/AudioPlayer.h"
 #include "common/DetectionResult.h"
+#include "common/FaceFeature.h"
+#include "common/RuntimeStatus.h"
 #include "common/VideoFrame.h"
 #include "inference/IDetector.h"
 #include "pipeline/FrameDispatcher.h"
+#include "recognition/FaceRecognizer.h"
 #include "video/FFmpegDecoder.h"
-#include "video/ImageSequenceReader.h"
 #include "video/VideoInputConfig.h"
 
 Q_DECLARE_METATYPE(ivp::DetectionResults)
+Q_DECLARE_METATYPE(ivp::RuntimeStatus)
 
 // Coordinates decoding, pixel conversion, and playback timing.
 // The decoder runs in a background producer thread while the UI thread
@@ -39,10 +41,15 @@ public:
 
     bool open(const QString& filename);
     bool openRtsp(const QString& rtspUrl);
-    bool openImageSequence(const QString& directoryPath, double fps = 10.0);
     void setDetectorConfig(const ivp::DetectorConfig& config);
     bool applyDetectorConfig(const ivp::DetectorConfig& config);
     ivp::DetectorConfig detectorConfig() const;
+    bool applyFaceRecognitionConfig(const ivp::FaceRecognitionConfig& config);
+    bool setFaceRecognitionGallery(ivp::FaceFeatureTemplates templates);
+    ivp::FaceRecognitionConfig faceRecognitionConfig() const;
+    std::size_t faceRecognitionGallerySize() const;
+    std::string faceRecognitionLastError() const;
+    ivp::FaceRecognitionDiagnostics faceRecognitionDiagnostics() const;
     void play();
     void pause();
     void stop();
@@ -52,6 +59,7 @@ public:
     bool isRtspSource() const;
     QString fileName() const;
     QString lastError() const;
+    ivp::RuntimeStatus runtimeStatus() const;
 
 signals:
     void frameReady(const QImage& image, qint64 positionMs, qint64 frameIndex);
@@ -68,11 +76,12 @@ signals:
         const QString& sourceId);
     void stateChanged(bool opened, bool playing);
     void videoInfoChanged(int width, int height, double fps, qint64 durationMs);
-    void audioInfoChanged(bool available, int sampleRate, int channels);
+    void runtimeStatusChanged(const ivp::RuntimeStatus& status);
     void errorOccurred(const QString& message);
 
 private slots:
     void consumeNextFrame();
+    void publishRuntimeStatus();
 
 private:
     void setProducerError(const QString& message);
@@ -82,7 +91,6 @@ private:
     static constexpr std::size_t kInferenceQueueCapacity = 2;
     static constexpr int kLivePreviewIntervalMs = 33;
     static constexpr int kLivePreviewPollIntervalMs = 5;
-    static constexpr int kMockInferenceDelayMs = 8;
 
     int playbackIntervalMs() const;
     qint64 masterClockMs() const;
@@ -108,22 +116,30 @@ private:
     void clearLastError();
     QString currentLastError() const;
     void resetSyncState();
+    void resetRuntimeMetrics();
+    void updateRuntimeFpsSample();
+    void setRuntimeState(ivp::RuntimeState state);
     void emitState();
     bool initializeDetector();
+    void applyFaceRecognition(
+        const ivp::VideoFrame& frame,
+        ivp::DetectionResults* results);
 
     FFmpegDecoder decoder_; // 解码器
-    ImageSequenceReader imageSequenceReader_; // 把图片序列当成视频进行读取
-    AudioPlayer audioPlayer_; // 播放器
     std::unique_ptr<ivp::IDetector> detector_; // 检测器
     ivp::DetectorConfig detectorConfig_;
     ivp::FrameDispatcher frameDispatcher_; // 帧调度队列:UI显示队列，AI推理队列
     ivp::VideoFramePtr pendingFrame_;
     QTimer frameTimer_; // 画面刷新定时器
     QElapsedTimer fallbackClock_; // 备用软件时钟
+    QTimer runtimeStatusTimer_;
+    QElapsedTimer runtimeFpsTimer_;
     std::thread producerThread_; // 生产者：解码线程
     std::thread inferenceThread_; // 消费者：AI检测线程
     mutable std::mutex errorMutex_;
     mutable std::mutex detectorMutex_;
+    mutable std::mutex faceRecognizerMutex_;
+    ivp::FaceRecognizer faceRecognizer_;
     QString fileName_;
     QString lastError_;
     QString producerError_;
@@ -131,11 +147,24 @@ private:
     qint64 fallbackClockBaseMs_;
     qint64 pendingFramePositionMs_;
     qint64 lastVideoPositionMs_;
+    std::int64_t lastDecodedFramesSample_;
+    std::int64_t lastDisplayedFramesSample_;
+    std::int64_t lastInferredFramesSample_;
+    double decodeFps_;
+    double displayFps_;
+    double runtimeInferenceFps_;
+    ivp::RuntimeState runtimeState_;
+    std::atomic<std::int64_t> decodedFrames_;
+    std::atomic<std::int64_t> displayedFrames_;
+    std::atomic<std::int64_t> inferredFrames_;
+    std::atomic<std::int64_t> lateDroppedDisplayFrames_;
+    std::atomic<std::int64_t> currentFrameIndex_;
+    std::atomic<std::int64_t> currentPtsMs_;
+    std::atomic<std::int64_t> lastInferenceLatencyMs_;
     std::atomic<bool> producerStopRequested_; // 原子变量，控制线程启停
     std::atomic<bool> producerFinished_; // 解码线程是否读取完毕视频末尾
     std::atomic<bool> inferenceStopRequested_;
     std::atomic<std::uint64_t> playbackGeneration_;
-    bool hasAudio_; // 是否存在音频流
     bool opened_; // 是否视频源打开
     bool playing_; // 是否正常播放
     bool framePending_;

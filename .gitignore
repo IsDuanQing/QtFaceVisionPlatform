@@ -34,6 +34,7 @@ docs/
 *.sqlite3
 *.jsonl
 *.csv
+data/face-references/
 logs/
 exports/
 

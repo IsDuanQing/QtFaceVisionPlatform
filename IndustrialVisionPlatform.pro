@@ -19,24 +19,21 @@ SOURCES += \
         apps/viewer/main.cpp \
         apps/viewer/MainWindow.cpp \
         apps/viewer/DetectionHistoryTableModel.cpp \
+        apps/viewer/FaceLibraryTableModel.cpp \
         apps/viewer/ViewerSettingsStore.cpp \
         apps/viewer/VideoDisplayWidget.cpp \
-        modules/audio/src/AudioPlayer.cpp \
+        modules/recognition/src/FaceRecognizer.cpp \
         modules/control/src/DetectionControlServer.cpp \
-        modules/inference/src/MockDetector.cpp \
-        modules/inference/src/TensorRTEngine.cpp \
         modules/inference/src/YoloPreprocessor.cpp \
         modules/inference/src/YoloPostprocessor.cpp \
         modules/inference/src/YoloOpenCVDnnDetector.cpp \
-        modules/inference/src/YoloTensorRTDetector.cpp \
         modules/pipeline/src/FrameDispatcher.cpp \
         modules/network/src/DetectionResultDelivery.cpp \
         modules/playback/src/VideoPlayer.cpp \
         modules/results/src/ResultManager.cpp \
         modules/storage/src/SQLiteDetectionStorage.cpp \
         modules/video/src/FFmpegDecoder.cpp \
-        modules/video/src/FrameConverter.cpp \
-        modules/video/src/ImageSequenceReader.cpp
+        modules/video/src/FrameConverter.cpp
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
@@ -46,21 +43,22 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 HEADERS += \
     apps/viewer/MainWindow.h \
     apps/viewer/DetectionHistoryTableModel.h \
+    apps/viewer/FaceLibraryTableModel.h \
     apps/viewer/ViewerSettingsStore.h \
     apps/viewer/VideoDisplayWidget.h \
-    modules/audio/include/audio/AudioPlayer.h \
     modules/common/include/common/BlockingQueue.h \
     modules/common/include/common/DetectionResult.h \
+    modules/common/include/common/FaceFeature.h \
+    modules/common/include/common/FaceRecognitionResult.h \
+    modules/common/include/common/RuntimeStatus.h \
     modules/common/include/common/VideoFrame.h \
     modules/control/include/control/DetectionControlProtocol.h \
     modules/control/include/control/DetectionControlServer.h \
     modules/inference/include/inference/IDetector.h \
-    modules/inference/include/inference/MockDetector.h \
-    modules/inference/include/inference/TensorRTEngine.h \
     modules/inference/include/inference/YoloPreprocessor.h \
     modules/inference/include/inference/YoloPostprocessor.h \
     modules/inference/include/inference/YoloOpenCVDnnDetector.h \
-    modules/inference/include/inference/YoloTensorRTDetector.h \
+    modules/recognition/include/recognition/FaceRecognizer.h \
     modules/network/include/network/DetectionDeliverySettings.h \
     modules/network/include/network/DetectionFramePacket.h \
     modules/network/include/network/DetectionResultDelivery.h \
@@ -70,7 +68,6 @@ HEADERS += \
     modules/storage/include/storage/SQLiteDetectionStorage.h \
     modules/video/include/video/FFmpegDecoder.h \
     modules/video/include/video/FrameConverter.h \
-    modules/video/include/video/ImageSequenceReader.h \
     modules/video/include/video/VideoInputConfig.h
 
 # FFmpeg / SQLite 依赖。
@@ -126,10 +123,10 @@ win32-msvc* {
 }
 
 INCLUDEPATH += $$PWD/apps/viewer
-INCLUDEPATH += $$PWD/modules/audio/include
 INCLUDEPATH += $$PWD/modules/common/include
 INCLUDEPATH += $$PWD/modules/control/include
 INCLUDEPATH += $$PWD/modules/inference/include
+INCLUDEPATH += $$PWD/modules/recognition/include
 INCLUDEPATH += $$PWD/modules/network/include
 INCLUDEPATH += $$PWD/modules/pipeline/include
 INCLUDEPATH += $$PWD/modules/playback/include
@@ -176,28 +173,26 @@ contains(DEFINES, IVP_ENABLE_OPENCV_DNN) {
     LIBS += $$OPENCV_LIBS
 }
 
-# 可选 TensorRT 支持。普通 Qt demo 构建默认不启用。
-# 在 Qt Creator 或命令行中通过下面的参数启用：
-#   qmake "DEFINES+=IVP_ENABLE_TENSORRT" \
-#     "TENSORRT_INCLUDE_DIR=/path/TensorRT/include" \
-#     "TENSORRT_LIB_DIR=/path/TensorRT/lib" \
-#     "CUDA_INCLUDE_DIR=/path/CUDA/include" \
-#     "CUDA_LIB_DIR=/path/CUDA/lib"
-contains(DEFINES, IVP_ENABLE_TENSORRT) {
-    isEmpty(TENSORRT_INCLUDE_DIR): error("TENSORRT_INCLUDE_DIR is required when IVP_ENABLE_TENSORRT is defined")
-    isEmpty(TENSORRT_LIB_DIR): error("TENSORRT_LIB_DIR is required when IVP_ENABLE_TENSORRT is defined")
-    isEmpty(CUDA_INCLUDE_DIR): error("CUDA_INCLUDE_DIR is required when IVP_ENABLE_TENSORRT is defined")
-    isEmpty(CUDA_LIB_DIR): error("CUDA_LIB_DIR is required when IVP_ENABLE_TENSORRT is defined")
-
-    INCLUDEPATH += $$TENSORRT_INCLUDE_DIR
-    INCLUDEPATH += $$CUDA_INCLUDE_DIR
-    win32-msvc* {
-        LIBS += /LIBPATH:$$TENSORRT_LIB_DIR
-        LIBS += /LIBPATH:$$CUDA_LIB_DIR
-        LIBS += nvinfer.lib nvinfer_plugin.lib cudart.lib
-    } else {
-        LIBS += -L$$TENSORRT_LIB_DIR
-        LIBS += -L$$CUDA_LIB_DIR
-        LIBS += -lnvinfer -lnvinfer_plugin -lcudart
+win32-g++ {
+    exists($$MSYS2_PREFIX/include/opencv5/opencv2/objdetect/face.hpp) {
+        DEFINES *= IVP_ENABLE_OPENCV_FACE_RECOGNITION
+    } else:exists($$MSYS2_PREFIX/include/opencv4/opencv2/objdetect/face.hpp) {
+        DEFINES *= IVP_ENABLE_OPENCV_FACE_RECOGNITION
     }
+}
+
+contains(DEFINES, IVP_ENABLE_OPENCV_FACE_RECOGNITION) {
+    isEmpty(MSYS2_PREFIX): MSYS2_PREFIX = C:/msys64/ucrt64
+    isEmpty(OPENCV_INCLUDE_DIR) {
+        exists($$MSYS2_PREFIX/include/opencv5/opencv2/objdetect/face.hpp) {
+            OPENCV_INCLUDE_DIR = $$MSYS2_PREFIX/include/opencv5
+        } else {
+            OPENCV_INCLUDE_DIR = $$MSYS2_PREFIX/include/opencv4
+        }
+    }
+    isEmpty(OPENCV_LIB_DIR): OPENCV_LIB_DIR = $$MSYS2_PREFIX/lib
+
+    INCLUDEPATH += $$OPENCV_INCLUDE_DIR
+    LIBS += -L$$OPENCV_LIB_DIR
+    LIBS += -lopencv_objdetect -lopencv_imgcodecs -lopencv_imgproc -lopencv_core
 }

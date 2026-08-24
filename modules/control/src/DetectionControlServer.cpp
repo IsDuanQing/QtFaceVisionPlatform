@@ -103,9 +103,45 @@ QJsonObject makeStatusReply(const ivp::DetectionControlStatus& status)
     object.insert(QStringLiteral("video_height"), status.videoHeight);
     object.insert(QStringLiteral("video_fps"), status.videoFps);
     object.insert(QStringLiteral("duration_ms"), static_cast<double>(status.durationMs));
-    object.insert(QStringLiteral("audio_available"), status.audioAvailable);
-    object.insert(QStringLiteral("audio_sample_rate"), status.audioSampleRate);
-    object.insert(QStringLiteral("audio_channels"), status.audioChannels);
+    object.insert(
+        QStringLiteral("runtime_state"),
+        QString::fromUtf8(runtimeStateName(status.runtime.state)));
+    object.insert(
+        QStringLiteral("decoded_frames"),
+        static_cast<double>(status.runtime.metrics.decodedFrames));
+    object.insert(
+        QStringLiteral("displayed_frames"),
+        static_cast<double>(status.runtime.metrics.displayedFrames));
+    object.insert(
+        QStringLiteral("inferred_frames"),
+        static_cast<double>(status.runtime.metrics.inferredFrames));
+    object.insert(QStringLiteral("decode_fps"), status.runtime.metrics.decodeFps);
+    object.insert(QStringLiteral("display_fps"), status.runtime.metrics.displayFps);
+    object.insert(QStringLiteral("inference_fps"), status.runtime.metrics.inferenceFps);
+    object.insert(
+        QStringLiteral("display_queue_size"),
+        static_cast<double>(status.runtime.metrics.displayQueueSize));
+    object.insert(
+        QStringLiteral("inference_queue_size"),
+        static_cast<double>(status.runtime.metrics.inferenceQueueSize));
+    object.insert(
+        QStringLiteral("dropped_display_frames"),
+        static_cast<double>(status.runtime.metrics.droppedDisplayFrames));
+    object.insert(
+        QStringLiteral("dropped_inference_frames"),
+        static_cast<double>(status.runtime.metrics.droppedInferenceFrames));
+    object.insert(
+        QStringLiteral("last_inference_latency_ms"),
+        static_cast<double>(status.runtime.metrics.lastInferenceLatencyMs));
+    object.insert(
+        QStringLiteral("current_frame_index"),
+        static_cast<double>(status.runtime.metrics.currentFrameIndex));
+    object.insert(
+        QStringLiteral("current_pts_ms"),
+        static_cast<double>(status.runtime.metrics.currentPtsMs));
+    object.insert(
+        QStringLiteral("runtime_last_error"),
+        QString::fromStdString(status.runtime.lastError));
     object.insert(QStringLiteral("message"), status.message);
     return object;
 }
@@ -272,21 +308,17 @@ bool parseTaskConfig(
         || !readStringField(command, QStringLiteral("task_id"), &config->taskId, error)
         || !readStringField(command, QStringLiteral("source_type"), &config->sourceType, error)
         || !readStringField(command, QStringLiteral("source_url"), &config->sourceUrl, error)
-        || !readDoubleField(command, QStringLiteral("image_sequence_fps"), 0.1, 240.0, &config->imageSequenceFps, error)
         || !readBoolField(command, QStringLiteral("auto_start"), &config->autoStart, error)
         || !readStringField(command, QStringLiteral("production_line_id"), &config->productionLineId, error)
         || !readStringField(command, QStringLiteral("batch_id"), &config->batchId, error)
-        || !readStringField(command, QStringLiteral("detector_backend"), &config->detectorBackend, error)
         || !readFloatField(command, QStringLiteral("confidence_threshold"), 0.0F, 1.0F, &config->confidenceThreshold, error)
         || !readFloatField(command, QStringLiteral("nms_threshold"), 0.0F, 1.0F, &config->nmsThreshold, error)
-        || !readIntField(command, QStringLiteral("simulated_delay_ms"), 0, 10000, &config->simulatedDelayMs, error)
         || !readIntField(command, QStringLiteral("detect_every_n_frames"), 1, 10000, &config->detectEveryNFrames, error)
         || !readIntField(command, QStringLiteral("input_width"), 1, 8192, &config->inputWidth, error)
         || !readIntField(command, QStringLiteral("input_height"), 1, 8192, &config->inputHeight, error)
         || !readIntField(command, QStringLiteral("class_count"), 0, 10000, &config->classCount, error)
         || !readIntField(command, QStringLiteral("max_detections"), 1, 10000, &config->maxDetections, error)
         || !readStringField(command, QStringLiteral("onnx_path"), &config->onnxPath, error)
-        || !readStringField(command, QStringLiteral("engine_path"), &config->enginePath, error)
         || !readStringField(command, QStringLiteral("labels_path"), &config->labelsPath, error))
     {
         return false;
@@ -301,12 +333,7 @@ bool parseTaskConfig(
             QStringLiteral("production_line_id"),
             error)
         || !validateNonEmptyField(config->batchId, QStringLiteral("batch_id"), error)
-        || !validateNonEmptyField(
-            config->detectorBackend,
-            QStringLiteral("detector_backend"),
-            error)
         || !validateNonEmptyField(config->onnxPath, QStringLiteral("onnx_path"), error)
-        || !validateNonEmptyField(config->enginePath, QStringLiteral("engine_path"), error)
         || !validateNonEmptyField(config->labelsPath, QStringLiteral("labels_path"), error))
     {
         return false;
@@ -322,30 +349,12 @@ bool parseTaskConfig(
     {
         const QString sourceType = config->sourceType->toLower();
         if (sourceType != QStringLiteral("file")
-            && sourceType != QStringLiteral("rtsp")
-            && sourceType != QStringLiteral("image_sequence"))
+            && sourceType != QStringLiteral("rtsp"))
         {
-            *error = QStringLiteral("source_type must be file, rtsp, or image_sequence.");
+            *error = QStringLiteral("source_type must be file or rtsp.");
             return false;
         }
         config->sourceType = sourceType;
-    }
-
-    if (config->detectorBackend.has_value())
-    {
-        const QString backend = config->detectorBackend->toLower();
-        if (backend != QStringLiteral("mock")
-            && backend != QStringLiteral("opencv")
-            && backend != QStringLiteral("opencv_dnn")
-            && backend != QStringLiteral("tensorrt"))
-        {
-            *error = QStringLiteral(
-                "detector_backend must be mock, opencv, opencv_dnn, or tensorrt.");
-            return false;
-        }
-        config->detectorBackend = backend == QStringLiteral("opencv")
-            ? QStringLiteral("opencv_dnn")
-            : backend;
     }
 
     return true;
@@ -367,6 +376,26 @@ QJsonObject detectionResultToJson(const ivp::DetectionResult& result)
     box.insert(QStringLiteral("width"), result.box.width);
     box.insert(QStringLiteral("height"), result.box.height);
     object.insert(QStringLiteral("box"), box);
+
+    QJsonObject face;
+    face.insert(QStringLiteral("matched"), result.face.matched);
+    if (result.face.matched)
+    {
+        face.insert(QStringLiteral("face_id"),
+                    result.face.faceId.has_value()
+                        ? static_cast<double>(*result.face.faceId)
+                        : 0.0);
+        face.insert(QStringLiteral("face_code"),
+                    QString::fromStdString(result.face.faceCode));
+        face.insert(QStringLiteral("face_name"),
+                    QString::fromStdString(result.face.faceName));
+        face.insert(QStringLiteral("distance"), result.face.distance);
+        face.insert(QStringLiteral("similarity"), result.face.similarity);
+        face.insert(QStringLiteral("threshold"), result.face.threshold);
+        face.insert(QStringLiteral("recognizer"),
+                    QString::fromStdString(result.face.recognizerName));
+    }
+    object.insert(QStringLiteral("face"), face);
     return object;
 }
 

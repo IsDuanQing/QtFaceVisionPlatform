@@ -11,7 +11,7 @@
 namespace
 {
 
-constexpr int kSettingsVersion = 1;
+constexpr int kSettingsVersion = 3;
 
 constexpr int kMinInputSize = 32;
 constexpr int kMaxInputSize = 4096;
@@ -19,10 +19,6 @@ constexpr int kMinMaxDetections = 1;
 constexpr int kMaxMaxDetections = 10000;
 constexpr int kMinEveryNFrames = 1;
 constexpr int kMaxEveryNFrames = 1000;
-constexpr int kMinMockDelayMs = 0;
-constexpr int kMaxMockDelayMs = 1000;
-constexpr double kMinImageSequenceFps = 1.0;
-constexpr double kMaxImageSequenceFps = 120.0;
 constexpr int kDefaultNetworkPort = 9000;
 constexpr int kMinNetworkPort = 1;
 constexpr int kMaxNetworkPort = 65535;
@@ -30,6 +26,11 @@ constexpr int kMaxNetworkPort = 65535;
 QString detectorGroupKey(const QString& key)
 {
     return QStringLiteral("detector/") + key;
+}
+
+QString recognitionGroupKey(const QString& key)
+{
+    return QStringLiteral("recognition/") + key;
 }
 
 std::string validOrDefaultPath(
@@ -43,6 +44,23 @@ std::string validOrDefaultPath(
     }
 
     return defaultPath;
+}
+
+bool isLegacyDefectModel(const QString& path)
+{
+    return QFileInfo(path).fileName().compare(
+               QStringLiteral("defect.onnx"),
+               Qt::CaseInsensitive)
+        == 0
+        || path.contains(QStringLiteral("yolo11l"), Qt::CaseInsensitive);
+}
+
+bool isBundledFaceModel(const QString& path)
+{
+    return QFileInfo(path).fileName().compare(
+               QStringLiteral("face.onnx"),
+               Qt::CaseInsensitive)
+        == 0;
 }
 
 } // namespace
@@ -91,22 +109,6 @@ ViewerSettings ViewerSettingsStore::load(const ViewerSettings& defaults) const
     }
 
     QSettings storage(settingsPath, QSettings::IniFormat);
-    const int backendValue = storage.value(
-        detectorGroupKey(QStringLiteral("backend")),
-        static_cast<int>(defaults.detectorConfig.backend)).toInt();
-    if (backendValue == static_cast<int>(ivp::DetectorBackend::TensorRT))
-    {
-        settings.detectorConfig.backend = ivp::DetectorBackend::TensorRT;
-    }
-    else if (backendValue == static_cast<int>(ivp::DetectorBackend::OpenCVDnn))
-    {
-        settings.detectorConfig.backend = ivp::DetectorBackend::OpenCVDnn;
-    }
-    else
-    {
-        settings.detectorConfig.backend = ivp::DetectorBackend::Mock;
-    }
-
     settings.detectorConfig.confidenceThreshold = qBound(
         0.0F,
         storage.value(
@@ -149,33 +151,79 @@ ViewerSettings ViewerSettingsStore::load(const ViewerSettings& defaults) const
             detectorGroupKey(QStringLiteral("detectEveryNFrames")),
             defaults.detectorConfig.detectEveryNFrames).toInt(),
         kMaxEveryNFrames);
-    settings.detectorConfig.simulatedDelayMs = qBound(
-        kMinMockDelayMs,
+    const QString storedOnnxPath = storage.value(
+        detectorGroupKey(QStringLiteral("onnxPath")),
+        QString::fromStdString(defaults.detectorConfig.onnxPath)).toString();
+    const QString storedLabelsPath = storage.value(
+        detectorGroupKey(QStringLiteral("labelsPath")),
+        QString::fromStdString(defaults.detectorConfig.labelsPath)).toString();
+    const bool migrateLegacyModel = isLegacyDefectModel(storedOnnxPath)
+        || (storedOnnxPath.isEmpty()
+            && storedLabelsPath.contains(QStringLiteral("yolo11l"),
+                                         Qt::CaseInsensitive));
+    settings.detectorConfig.onnxPath = migrateLegacyModel
+        ? defaults.detectorConfig.onnxPath
+        : validOrDefaultPath(storedOnnxPath, defaults.detectorConfig.onnxPath);
+    settings.detectorConfig.labelsPath = migrateLegacyModel
+        ? defaults.detectorConfig.labelsPath
+        : validOrDefaultPath(storedLabelsPath, defaults.detectorConfig.labelsPath);
+
+    // The bundled face model is exported with a fixed 640x640 input and one
+    // class. Correct stale settings before they reach OpenCV DNN.
+    if (isBundledFaceModel(
+            QString::fromStdString(settings.detectorConfig.onnxPath)))
+    {
+        settings.detectorConfig.inputWidth = 640;
+        settings.detectorConfig.inputHeight = 640;
+        settings.detectorConfig.classCount = 1;
+    }
+
+    settings.faceRecognitionConfig.enabled = storage.value(
+        recognitionGroupKey(QStringLiteral("enabled")),
+        defaults.faceRecognitionConfig.enabled).toBool();
+    const QString storedFeatureModelPath = storage.value(
+        recognitionGroupKey(QStringLiteral("featureModelPath")),
+        QString::fromStdString(defaults.faceRecognitionConfig.featureModelPath)).toString();
+    settings.faceRecognitionConfig.featureModelPath = validOrDefaultPath(
+        storedFeatureModelPath,
+        defaults.faceRecognitionConfig.featureModelPath);
+    settings.faceRecognitionConfig.similarityThreshold = qBound(
+        0.0F,
         storage.value(
-            detectorGroupKey(QStringLiteral("simulatedDelayMs")),
-            defaults.detectorConfig.simulatedDelayMs).toInt(),
-        kMaxMockDelayMs);
-    settings.detectorConfig.onnxPath = validOrDefaultPath(
+            recognitionGroupKey(QStringLiteral("similarityThreshold")),
+            defaults.faceRecognitionConfig.similarityThreshold).toFloat(),
+        1.0F);
+    settings.faceRecognitionConfig.minSimilarityMargin = qBound(
+        0.0F,
         storage.value(
-            detectorGroupKey(QStringLiteral("onnxPath")),
-            QString::fromStdString(defaults.detectorConfig.onnxPath)).toString(),
-        defaults.detectorConfig.onnxPath);
-    settings.detectorConfig.enginePath = validOrDefaultPath(
+            recognitionGroupKey(QStringLiteral("minSimilarityMargin")),
+            defaults.faceRecognitionConfig.minSimilarityMargin).toFloat(),
+        1.0F);
+    settings.faceRecognitionConfig.minFaceSizePixels = qBound(
+        1,
         storage.value(
-            detectorGroupKey(QStringLiteral("enginePath")),
-            QString::fromStdString(defaults.detectorConfig.enginePath)).toString(),
-        defaults.detectorConfig.enginePath);
-    settings.detectorConfig.labelsPath = validOrDefaultPath(
+            recognitionGroupKey(QStringLiteral("minFaceSizePixels")),
+            defaults.faceRecognitionConfig.minFaceSizePixels).toInt(),
+        4096);
+    settings.faceRecognitionConfig.normalizedWidth = qBound(
+        1,
         storage.value(
-            detectorGroupKey(QStringLiteral("labelsPath")),
-            QString::fromStdString(defaults.detectorConfig.labelsPath)).toString(),
-        defaults.detectorConfig.labelsPath);
-    settings.imageSequenceFps = qBound(
-        kMinImageSequenceFps,
+            recognitionGroupKey(QStringLiteral("normalizedWidth")),
+            defaults.faceRecognitionConfig.normalizedWidth).toInt(),
+        4096);
+    settings.faceRecognitionConfig.normalizedHeight = qBound(
+        1,
         storage.value(
-            QStringLiteral("imageSequenceFps"),
-            defaults.imageSequenceFps).toDouble(),
-        kMaxImageSequenceFps);
+            recognitionGroupKey(QStringLiteral("normalizedHeight")),
+            defaults.faceRecognitionConfig.normalizedHeight).toInt(),
+        4096);
+    settings.faceRecognitionConfig.facePaddingRatio = qBound(
+        0.0F,
+        storage.value(
+            recognitionGroupKey(QStringLiteral("facePaddingRatio")),
+            defaults.faceRecognitionConfig.facePaddingRatio).toFloat(),
+        1.0F);
+
     settings.delivery.exportEnabled = storage.value(
         QStringLiteral("delivery/exportEnabled"),
         defaults.delivery.exportEnabled).toBool();
@@ -240,9 +288,6 @@ bool ViewerSettingsStore::save(const ViewerSettings& settings) const
     QSettings storage(settingsPath, QSettings::IniFormat);
     storage.setValue(QStringLiteral("schemaVersion"), kSettingsVersion);
     storage.setValue(
-        detectorGroupKey(QStringLiteral("backend")),
-        static_cast<int>(settings.detectorConfig.backend));
-    storage.setValue(
         detectorGroupKey(QStringLiteral("confidenceThreshold")),
         settings.detectorConfig.confidenceThreshold);
     storage.setValue(
@@ -264,20 +309,35 @@ bool ViewerSettingsStore::save(const ViewerSettings& settings) const
         detectorGroupKey(QStringLiteral("detectEveryNFrames")),
         settings.detectorConfig.detectEveryNFrames);
     storage.setValue(
-        detectorGroupKey(QStringLiteral("simulatedDelayMs")),
-        settings.detectorConfig.simulatedDelayMs);
-    storage.setValue(
         detectorGroupKey(QStringLiteral("onnxPath")),
         QString::fromStdString(settings.detectorConfig.onnxPath));
-    storage.setValue(
-        detectorGroupKey(QStringLiteral("enginePath")),
-        QString::fromStdString(settings.detectorConfig.enginePath));
     storage.setValue(
         detectorGroupKey(QStringLiteral("labelsPath")),
         QString::fromStdString(settings.detectorConfig.labelsPath));
     storage.setValue(
-        QStringLiteral("imageSequenceFps"),
-        settings.imageSequenceFps);
+        recognitionGroupKey(QStringLiteral("enabled")),
+        settings.faceRecognitionConfig.enabled);
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("featureModelPath")),
+        QString::fromStdString(settings.faceRecognitionConfig.featureModelPath));
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("similarityThreshold")),
+        settings.faceRecognitionConfig.similarityThreshold);
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("minSimilarityMargin")),
+        settings.faceRecognitionConfig.minSimilarityMargin);
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("minFaceSizePixels")),
+        settings.faceRecognitionConfig.minFaceSizePixels);
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("normalizedWidth")),
+        settings.faceRecognitionConfig.normalizedWidth);
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("normalizedHeight")),
+        settings.faceRecognitionConfig.normalizedHeight);
+    storage.setValue(
+        recognitionGroupKey(QStringLiteral("facePaddingRatio")),
+        settings.faceRecognitionConfig.facePaddingRatio);
     storage.setValue(
         QStringLiteral("delivery/exportEnabled"),
         settings.delivery.exportEnabled);

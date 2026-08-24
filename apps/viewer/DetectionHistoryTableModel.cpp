@@ -1,3 +1,4 @@
+
 #include "DetectionHistoryTableModel.h"
 
 #include <utility>
@@ -12,6 +13,21 @@ namespace
 QString textOrFallback(const std::string& text, const QString& fallback)
 {
     return text.empty() ? fallback : QString::fromStdString(text);
+}
+
+QString faceDisplayText(const ivp::DetectionHistoryRow& row)
+{
+    const QString name = textOrFallback(
+        row.faceName,
+        textOrFallback(row.faceCode, QStringLiteral("--")));
+    if (!row.faceId.has_value() || row.faceSimilarity <= 0.0F)
+    {
+        return name;
+    }
+
+    return QStringLiteral("%1  %2%")
+        .arg(name)
+        .arg(static_cast<int>(row.faceSimilarity * 100.0F));
 }
 
 QVariant int64Variant(std::int64_t value)
@@ -67,7 +83,7 @@ QVariant DetectionHistoryTableModel::data(const QModelIndex& index, int role) co
     if (role == Qt::ToolTipRole)
     {
         return QStringLiteral(
-            "Record #%1\nSession #%2\nSource: %3\nInput: %4\nFrame: %5\nPTS: %6\nClass: %7\nConfidence: %8\nBox: %9")
+            "Record #%1\nSession #%2\nSource: %3\nInput: %4\nFrame: %5\nPTS: %6\nClass: %7\nFace: %8\nConfidence: %9\nBox: %10")
             .arg(row.recordId)
             .arg(row.sessionId)
             .arg(QString::fromStdString(row.sourceId))
@@ -75,6 +91,7 @@ QVariant DetectionHistoryTableModel::data(const QModelIndex& index, int role) co
             .arg(row.frameIndex)
             .arg(formatPts(row.ptsMs))
             .arg(textOrFallback(row.className, QStringLiteral("--")))
+            .arg(faceDisplayText(row))
             .arg(QString::number(row.confidence, 'f', 3))
             .arg(formatBox(row.box));
     }
@@ -104,6 +121,8 @@ QVariant DetectionHistoryTableModel::data(const QModelIndex& index, int role) co
         return formatBox(row.box);
     case ObjectCountColumn:
         return int64Variant(row.frameObjectCount);
+    case FaceColumn:
+        return faceDisplayText(row);
     case InputColumn:
         return textOrFallback(row.inputUrl, QStringLiteral("--"));
     default:
@@ -141,6 +160,8 @@ QVariant DetectionHistoryTableModel::headerData(
         return tr("Box");
     case ObjectCountColumn:
         return tr("Objects");
+    case FaceColumn:
+        return tr("Face");
     case InputColumn:
         return tr("Input");
     default:

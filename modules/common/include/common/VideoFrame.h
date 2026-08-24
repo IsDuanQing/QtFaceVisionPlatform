@@ -28,7 +28,7 @@ struct VideoFrameMetadata // 结构体->一次性封装可修改的业务数据
 
 // 这是由 CPU 管理的视频帧，可以被解码、播放、推理、存储模块共享。
 // The first stable format is RGB24 because it is easy to display and easy to
-// adapt into OpenCV/TensorRT preprocessing.
+// adapt into OpenCV preprocessing.
 struct VideoFrame
 {
     VideoFrameMetadata metadata;

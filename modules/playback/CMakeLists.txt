@@ -19,8 +19,8 @@ target_link_libraries(ivp_playback
         ${IVP_QT_GUI}
         ivp_common
         ivp_pipeline
-        ivp_audio
         ivp_inference
+        ivp_recognition
         ivp_video
         Threads::Threads
 )

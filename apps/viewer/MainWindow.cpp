@@ -1,22 +1,30 @@
 #include "MainWindow.h"
 
 #include "DetectionHistoryTableModel.h"
+#include "FaceLibraryTableModel.h"
+#include "inference/YoloOpenCVDnnDetector.h"
 
 #include <QAbstractScrollArea>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
+#include <QEvent>
 #include <QDateTime>
 #include <QDateTimeEdit>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFile>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
+#include <QItemSelectionModel>
 #include <QList>
 #include <QInputDialog>
 #include <QLineEdit>
@@ -24,14 +32,21 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QStringList>
 #include <QSizePolicy>
 #include <QTableView>
 #include <QVariant>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -52,12 +67,152 @@ QLabel* createMetricValue(const QString& text)
     return label;
 }
 
+class WheelBlocker final : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        Q_UNUSED(watched)
+        if (event->type() == QEvent::Wheel)
+        {
+            return true;
+        }
+
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+void installWheelBlocker(QWidget* widget)
+{
+    static WheelBlocker blocker;
+    if (widget != nullptr)
+    {
+        widget->installEventFilter(&blocker);
+    }
+}
+
+void styleLineEdit(QLineEdit* widget, int minWidth = 240)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+
+    widget->setMinimumWidth(minWidth);
+    widget->setMinimumHeight(32);
+    widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+void styleComboBox(QComboBox* widget, int minWidth = 180)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+
+    widget->setMinimumWidth(minWidth);
+    widget->setMinimumHeight(32);
+    widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    installWheelBlocker(widget);
+}
+
+void styleNumericSpin(QAbstractSpinBox* widget, int minWidth = 112)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+
+    widget->setMinimumWidth(minWidth);
+    widget->setMinimumHeight(32);
+    widget->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    widget->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
+    installWheelBlocker(widget);
+}
+
+void styleActionButton(
+    QPushButton* button,
+    const QIcon& icon,
+    const QString& tooltip,
+    int minWidth = 84)
+{
+    if (button == nullptr)
+    {
+        return;
+    }
+
+    button->setIcon(icon);
+    button->setToolTip(tooltip);
+    const int preferredWidth = std::max(minWidth, button->sizeHint().width() + 10);
+    button->setFixedSize(preferredWidth, 34);
+    button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    button->setAutoDefault(false);
+}
+
+void styleBrowseButton(QPushButton* button)
+{
+    if (button == nullptr)
+    {
+        return;
+    }
+
+    button->setMinimumWidth(36);
+    button->setMinimumHeight(32);
+    button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+}
+
 void setLabelTextIfChanged(QLabel* label, const QString& text)
 {
     if (label != nullptr && label->text() != text)
     {
         label->setText(text);
     }
+}
+
+std::string referenceDetectorSignature(const ivp::DetectorConfig& config)
+{
+    std::ostringstream signature;
+    signature << "backend=" << static_cast<int>(config.backend)
+              << "|confidence=" << std::fixed << std::setprecision(6)
+              << config.confidenceThreshold
+              << "|nms=" << config.nmsThreshold
+              << "|input_width=" << config.inputWidth
+              << "|input_height=" << config.inputHeight
+              << "|class_count=" << config.classCount
+              << "|max_detections=" << config.maxDetections
+              << "|onnx=" << config.onnxPath
+              << "|labels=" << config.labelsPath;
+    return signature.str();
+}
+
+bool sameFaceRecognitionFloat(float left, float right)
+{
+    return std::fabs(left - right) < 0.0001F;
+}
+
+bool sameFaceRecognitionConfig(
+    const ivp::FaceRecognitionConfig& left,
+    const ivp::FaceRecognitionConfig& right)
+{
+    return left.enabled == right.enabled
+        && left.featureModelPath == right.featureModelPath
+        && sameFaceRecognitionFloat(
+               left.similarityThreshold,
+               right.similarityThreshold)
+        && sameFaceRecognitionFloat(
+               left.minSimilarityMargin,
+               right.minSimilarityMargin)
+        && left.minFaceSizePixels == right.minFaceSizePixels
+        && left.normalizedWidth == right.normalizedWidth
+        && left.normalizedHeight == right.normalizedHeight
+        && sameFaceRecognitionFloat(
+               left.facePaddingRatio,
+               right.facePaddingRatio)
+        && left.referenceDetectorSignature
+            == right.referenceDetectorSignature;
 }
 
 QStringList candidateProjectRoots()
@@ -97,6 +252,97 @@ QString projectResourcePath(const QString& relativePath)
     return QFileInfo(relativePath).absoluteFilePath();
 }
 
+QString projectRootDirectory()
+{
+    for (const QString& base : candidateProjectRoots())
+    {
+        const QDir root(base);
+        if (QFileInfo(root.filePath(QStringLiteral("README.md"))).exists()
+            && QFileInfo(root.filePath(QStringLiteral("modules"))).isDir()
+            && QFileInfo(root.filePath(QStringLiteral("apps"))).isDir())
+        {
+            return root.absolutePath();
+        }
+    }
+
+    return QDir::currentPath();
+}
+
+QString sanitizePathComponent(const QString& text, const QString& fallback)
+{
+    QString result;
+    result.reserve(text.size());
+    for (const QChar ch : text.trimmed())
+    {
+        if (ch.isLetterOrNumber() || ch == QLatin1Char('_') || ch == QLatin1Char('-'))
+        {
+            result.append(ch);
+        }
+        else
+        {
+            result.append(QLatin1Char('_'));
+        }
+    }
+
+    if (result.isEmpty())
+    {
+        return fallback;
+    }
+
+    return result;
+}
+
+QString storeFaceReferenceImage(
+    const QString& sourcePath,
+    const QString& faceCode,
+    QString* relativePath)
+{
+    const QFileInfo sourceInfo(sourcePath);
+    if (!sourceInfo.exists() || !sourceInfo.isFile())
+    {
+        return {};
+    }
+
+    const QString rootPath = projectRootDirectory();
+    const QDir rootDir(rootPath);
+    const QString faceFolderPath = rootDir.filePath(
+        QStringLiteral("data/face-references/%1")
+            .arg(sanitizePathComponent(faceCode, QStringLiteral("face"))));
+    if (!QDir().mkpath(faceFolderPath))
+    {
+        return {};
+    }
+
+    QString extension = sourceInfo.suffix().trimmed().toLower();
+    if (extension.isEmpty())
+    {
+        extension = QStringLiteral("png");
+    }
+
+    const QString targetPath = QDir(faceFolderPath).filePath(
+        QStringLiteral("reference.%1").arg(extension));
+    const QString absoluteSourcePath = sourceInfo.absoluteFilePath();
+    if (QFileInfo(absoluteSourcePath).absoluteFilePath()
+        != QFileInfo(targetPath).absoluteFilePath())
+    {
+        if (QFile::exists(targetPath) && !QFile::remove(targetPath))
+        {
+            return {};
+        }
+        if (!QFile::copy(absoluteSourcePath, targetPath))
+        {
+            return {};
+        }
+    }
+
+    if (relativePath != nullptr)
+    {
+        *relativePath = rootDir.relativeFilePath(targetPath);
+    }
+
+    return targetPath;
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -106,6 +352,7 @@ MainWindow::MainWindow(QWidget* parent)
       resultManager_(),
       detectionStorage_(),
       detectionDelivery_(),
+      faceReferenceRecognizer_(),
       settingsStore_(),
       defaultViewerSettings_(),
       storageSessionId_(0),
@@ -115,7 +362,6 @@ MainWindow::MainWindow(QWidget* parent)
       resolutionValueLabel_(nullptr),
       fpsValueLabel_(nullptr),
       durationValueLabel_(nullptr),
-      audioValueLabel_(nullptr),
       statusValueLabel_(nullptr),
       positionValueLabel_(nullptr),
       detectionValueLabel_(nullptr),
@@ -123,14 +369,13 @@ MainWindow::MainWindow(QWidget* parent)
       controlStatusLabel_(nullptr),
       historyStatusLabel_(nullptr),
       deliveryStatusLabel_(nullptr),
+      runtimeSummaryValueLabel_(nullptr),
       displayedFrameValueLabel_(nullptr),
       detectedFrameValueLabel_(nullptr),
       previewLagValueLabel_(nullptr),
       inferenceFpsValueLabel_(nullptr),
       openButton_(nullptr),
       rtspButton_(nullptr),
-      imageSequenceButton_(nullptr),
-      faceDemoButton_(nullptr),
       playPauseButton_(nullptr),
       stopButton_(nullptr),
       historyRefreshButton_(nullptr),
@@ -141,7 +386,9 @@ MainWindow::MainWindow(QWidget* parent)
       clearOverlayButton_(nullptr),
       exportBrowseButton_(nullptr),
       historyModel_(nullptr),
+      faceLibraryModel_(nullptr),
       historyTableView_(nullptr),
+      faceLibraryTableView_(nullptr),
       historySessionCombo_(nullptr),
       historySourceEdit_(nullptr),
       historyClassEdit_(nullptr),
@@ -150,7 +397,9 @@ MainWindow::MainWindow(QWidget* parent)
       historyStartEdit_(nullptr),
       historyEndEdit_(nullptr),
       historyLimitSpinBox_(nullptr),
-      detectorBackendCombo_(nullptr),
+      historyFaceCombo_(nullptr),
+      historyFaceBindButton_(nullptr),
+      historyFaceClearButton_(nullptr),
       confidenceSpinBox_(nullptr),
       nmsSpinBox_(nullptr),
       maxDetectionsSpinBox_(nullptr),
@@ -158,11 +407,13 @@ MainWindow::MainWindow(QWidget* parent)
       inputHeightSpinBox_(nullptr),
       classCountSpinBox_(nullptr),
       detectEverySpinBox_(nullptr),
-      mockDelaySpinBox_(nullptr),
-      imageSequenceFpsSpinBox_(nullptr),
       onnxPathEdit_(nullptr),
-      enginePathEdit_(nullptr),
       labelsPathEdit_(nullptr),
+      faceFeatureModelPathEdit_(nullptr),
+      faceRecognitionThresholdSpinBox_(nullptr),
+      faceRecognitionMarginSpinBox_(nullptr),
+      faceRecognitionMinFaceSizeSpinBox_(nullptr),
+      faceRecognitionPaddingSpinBox_(nullptr),
       exportResultsCheck_(nullptr),
       exportFormatCombo_(nullptr),
       exportDirectoryEdit_(nullptr),
@@ -172,8 +423,19 @@ MainWindow::MainWindow(QWidget* parent)
       networkPortSpinBox_(nullptr),
       previewModeCombo_(nullptr),
       onnxBrowseButton_(nullptr),
-      engineBrowseButton_(nullptr),
       labelsBrowseButton_(nullptr),
+      faceCodeEdit_(nullptr),
+      faceNameEdit_(nullptr),
+      faceImagePathEdit_(nullptr),
+      faceNotesEdit_(nullptr),
+      faceImageBrowseButton_(nullptr),
+      faceRecognitionApplyButton_(nullptr),
+      faceAddButton_(nullptr),
+      faceRemoveButton_(nullptr),
+      faceRefreshButton_(nullptr),
+      faceLibraryStatusLabel_(nullptr),
+      faceRecognitionStatusLabel_(nullptr),
+      faceFeatureModelStatusLabel_(nullptr),
       displayedPreviewFrameIndex_(-1),
       latestDetectionFrameIndex_(-1),
       inferenceFpsFrameCount_(0),
@@ -187,20 +449,18 @@ MainWindow::MainWindow(QWidget* parent)
       controlVideoWidth_(0),
       controlVideoHeight_(0),
       controlVideoFps_(0.0),
-      controlDurationMs_(0),
-      controlAudioAvailable_(false),
-      controlAudioSampleRate_(0),
-      controlAudioChannels_(0)
+      controlDurationMs_(0)
 {
+    faceReferenceRecognizer_.initialize(player_.faceRecognitionConfig());
     defaultViewerSettings_.detectorConfig = player_.detectorConfig();
-    defaultViewerSettings_.imageSequenceFps = 10.0;
+    defaultViewerSettings_.faceRecognitionConfig = player_.faceRecognitionConfig();
     const QString documentsDirectory =
         QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     const QString exportBaseDirectory = documentsDirectory.isEmpty()
         ? QDir::currentPath()
         : documentsDirectory;
     defaultViewerSettings_.delivery.exportDirectory =
-        QDir(exportBaseDirectory).filePath(QStringLiteral("IndustrialVisionExports"));
+        QDir(exportBaseDirectory).filePath(QStringLiteral("FaceRecognitionExports"));
     defaultViewerSettings_.delivery.networkHost = QStringLiteral("127.0.0.1");
     defaultViewerSettings_.delivery.networkPort = 9000;
 
@@ -211,6 +471,7 @@ MainWindow::MainWindow(QWidget* parent)
     initializeStorage();
     initializeControlService();
     updatePlayerState(false, false);
+    updateFaceRecognitionDiagnostics();
 }
 
 MainWindow::~MainWindow()
@@ -240,6 +501,7 @@ void MainWindow::openVideo()
     resetDetectionSummary();
     resetPreviewDebug();
     applyCurrentDetectorConfig();
+    applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
 
     if (player_.open(filename))
@@ -283,95 +545,13 @@ void MainWindow::openRtspStream()
     resetDetectionSummary();
     resetPreviewDebug();
     applyCurrentDetectorConfig();
+    applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
 
     if (player_.openRtsp(rtspUrl))
     {
         fileLabel_->setText(rtspUrl);
         startStorageSession(rtspUrl);
-        statusValueLabel_->setText(tr("Ready"));
-        player_.play();
-        syncControlStatus(true);
-    }
-}
-
-void MainWindow::openImageSequence()
-{
-    const QString mot20Directory =
-        projectResourcePath(QStringLiteral("videos/mot20-02/img1"));
-    const QString defaultDirectory = QFileInfo(mot20Directory).exists()
-        ? mot20Directory
-        : QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
-    const QString directory = QFileDialog::getExistingDirectory(
-        this,
-        tr("Open Image Folder"),
-        defaultDirectory);
-
-    if (directory.isEmpty())
-    {
-        return;
-    }
-
-    finishStorageSession();
-    videoWidget_->clear();
-    videoWidget_->setPlaceholderText(tr("Loading image sequence..."));
-    resetDetectionSummary();
-    resetPreviewDebug();
-    applyCurrentDetectorConfig();
-    applyCurrentDeliveryConfig();
-
-    const double fps = imageSequenceFpsSpinBox_ == nullptr
-        ? 10.0
-        : imageSequenceFpsSpinBox_->value();
-    if (player_.openImageSequence(directory, fps))
-    {
-        fileLabel_->setText(directory);
-        startStorageSession(directory);
-        statusValueLabel_->setText(tr("Ready"));
-
-        // Image-folder inspection is closer to "one image, one result" than to
-        // continuous video playback, so prefer the strict synchronized preview.
-        const int detectionPreviewIndex =
-            previewModeCombo_ == nullptr
-                ? -1
-                : previewModeCombo_->findData(static_cast<int>(PreviewMode::Detection));
-        if (detectionPreviewIndex >= 0 && previewModeCombo_->currentIndex() != detectionPreviewIndex)
-        {
-            previewModeCombo_->setCurrentIndex(detectionPreviewIndex);
-        }
-
-        player_.play();
-        syncControlStatus(true);
-    }
-}
-
-void MainWindow::openFaceDemo()
-{
-    applyFaceDetectorPreset();
-
-    const QString videoPath =
-        projectResourcePath(QStringLiteral("videos/face-detection/face-test.mp4"));
-    if (!QFileInfo(videoPath).exists())
-    {
-        QMessageBox::warning(
-            this,
-            tr("Face Demo"),
-            tr("Could not find the bundled face demo video: %1").arg(videoPath));
-        return;
-    }
-
-    finishStorageSession();
-    videoWidget_->clear();
-    videoWidget_->setPlaceholderText(tr("Loading face demo..."));
-    resetDetectionSummary();
-    resetPreviewDebug();
-    applyCurrentDetectorConfig();
-    applyCurrentDeliveryConfig();
-
-    if (player_.open(videoPath))
-    {
-        fileLabel_->setText(videoPath);
-        startStorageSession(videoPath);
         statusValueLabel_->setText(tr("Ready"));
         player_.play();
         syncControlStatus(true);
@@ -495,11 +675,16 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
     playPauseButton_->setEnabled(opened);
     stopButton_->setEnabled(opened);
     playPauseButton_->setText(playing ? tr("Pause") : tr("Play"));
+    if (playPauseButton_ != nullptr)
+    {
+        playPauseButton_->setIcon(qApp->style()->standardIcon(
+            playing ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
+    }
     statusValueLabel_->setText(opened
         ? (isDetectionPreviewMode()
               ? tr("Detection Preview")
               : (playing ? tr("Playing") : tr("Paused")))
-        : tr("No Video"));
+        : tr("No Source"));
     syncControlStatus(true);
 
     if (!opened)
@@ -507,12 +692,11 @@ void MainWindow::updatePlayerState(bool opened, bool playing)
         finishStorageSession();
         videoWidget_->clear();
         videoWidget_->setPlaceholderText(
-            tr("Open a video, image folder, or RTSP stream to start inspection preview"));
+            tr("Open a video or RTSP stream to start face preview"));
         fileLabel_->setText(tr("No input selected"));
         resolutionValueLabel_->setText(QStringLiteral("--"));
         fpsValueLabel_->setText(QStringLiteral("--"));
         durationValueLabel_->setText(QStringLiteral("--"));
-        audioValueLabel_->setText(QStringLiteral("--"));
         positionValueLabel_->setText(QStringLiteral("00:00"));
         resetDetectionSummary();
         resetPreviewDebug();
@@ -531,16 +715,14 @@ void MainWindow::updateVideoInfo(int width, int height, double fps, qint64 durat
     syncControlStatus(true);
 }
 
-void MainWindow::updateAudioInfo(bool available, int sampleRate, int channels)
+void MainWindow::updateRuntimeStatus(const ivp::RuntimeStatus& status)
 {
-    audioValueLabel_->setText(
-        available
-            ? QStringLiteral("%1 Hz / %2 ch").arg(sampleRate).arg(channels)
-            : tr("No Audio"));
-    controlAudioAvailable_ = available;
-    controlAudioSampleRate_ = sampleRate;
-    controlAudioChannels_ = channels;
-    syncControlStatus(true);
+    if (runtimeSummaryValueLabel_ != nullptr)
+    {
+        setLabelTextIfChanged(runtimeSummaryValueLabel_, formatRuntimeSummary(status));
+    }
+
+    syncControlStatus(false);
 }
 
 void MainWindow::showPlayerError(const QString& message)
@@ -568,6 +750,7 @@ void MainWindow::refreshHistory()
     }
 
     reloadHistorySessions();
+    reloadFaceIdentities();
     const ivp::DetectionHistoryQuery query = collectHistoryQuery();
     if (query.recordedAfterMs.has_value()
         && query.recordedBeforeMs.has_value()
@@ -646,7 +829,7 @@ void MainWindow::buildUi()
     QWidget* centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
 
-    titleLabel_ = new QLabel(tr("Industrial Vision Platform"));
+    titleLabel_ = new QLabel(tr("Face Recognition Platform"));
     titleLabel_->setObjectName(QStringLiteral("titleLabel"));
 
     fileLabel_ = new QLabel(tr("No input selected"));
@@ -655,22 +838,40 @@ void MainWindow::buildUi()
 
     videoWidget_ = new VideoDisplayWidget();
 
-    openButton_ = new QPushButton(tr("Open File"));
+    openButton_ = new QPushButton(tr("Open"));
     openButton_->setObjectName(QStringLiteral("primaryButton"));
-    rtspButton_ = new QPushButton(tr("Open RTSP"));
-    imageSequenceButton_ = new QPushButton(tr("Open Images"));
-    faceDemoButton_ = new QPushButton(tr("Face Demo"));
+    rtspButton_ = new QPushButton(tr("RTSP"));
     playPauseButton_ = new QPushButton(tr("Play"));
     stopButton_ = new QPushButton(tr("Stop"));
+    styleActionButton(
+        openButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogOpenButton),
+        tr("Open a video file"),
+        84);
+    styleActionButton(
+        rtspButton_,
+        qApp->style()->standardIcon(QStyle::SP_ComputerIcon),
+        tr("Open an RTSP stream"),
+        84);
+    styleActionButton(
+        playPauseButton_,
+        qApp->style()->standardIcon(QStyle::SP_MediaPlay),
+        tr("Play or pause playback"),
+        84);
+    styleActionButton(
+        stopButton_,
+        qApp->style()->standardIcon(QStyle::SP_MediaStop),
+        tr("Stop playback"),
+        84);
 
     resolutionValueLabel_ = createMetricValue(QStringLiteral("--"));
     fpsValueLabel_ = createMetricValue(QStringLiteral("--"));
     durationValueLabel_ = createMetricValue(QStringLiteral("--"));
-    audioValueLabel_ = createMetricValue(QStringLiteral("--"));
     positionValueLabel_ = createMetricValue(QStringLiteral("00:00"));
     detectionValueLabel_ = createMetricValue(QStringLiteral("0 / 0"));
     storageValueLabel_ = createMetricValue(tr("Off"));
-    statusValueLabel_ = createMetricValue(tr("No Video"));
+    statusValueLabel_ = createMetricValue(tr("No Source"));
+    runtimeSummaryValueLabel_ = createMetricValue(QStringLiteral("--"));
     displayedFrameValueLabel_ = createMetricValue(QStringLiteral("--"));
     detectedFrameValueLabel_ = createMetricValue(QStringLiteral("--"));
     previewLagValueLabel_ = createMetricValue(QStringLiteral("--"));
@@ -678,14 +879,13 @@ void MainWindow::buildUi()
     previewModeCombo_ = new QComboBox();
     previewModeCombo_->addItem(tr("Playback Preview"), static_cast<int>(PreviewMode::Playback));
     previewModeCombo_->addItem(tr("Detection Preview"), static_cast<int>(PreviewMode::Detection));
+    styleComboBox(previewModeCombo_, 180);
 
     QHBoxLayout* headerLayout = new QHBoxLayout();
     headerLayout->addWidget(titleLabel_);
     headerLayout->addStretch();
     headerLayout->addWidget(openButton_);
     headerLayout->addWidget(rtspButton_);
-    headerLayout->addWidget(imageSequenceButton_);
-    headerLayout->addWidget(faceDemoButton_);
     headerLayout->addWidget(playPauseButton_);
     headerLayout->addWidget(stopButton_);
 
@@ -694,7 +894,7 @@ void MainWindow::buildUi()
 
     QGridLayout* metricsLayout = new QGridLayout(infoPanel);
     metricsLayout->setContentsMargins(18, 14, 18, 14);
-    metricsLayout->setHorizontalSpacing(16);
+    metricsLayout->setHorizontalSpacing(22);
     metricsLayout->setVerticalSpacing(8);
     const auto addMetric = [metricsLayout](int row, int pair, const QString& label, QWidget* value) {
         const int column = pair * 2;
@@ -705,16 +905,20 @@ void MainWindow::buildUi()
     addMetric(0, 0, tr("Resolution"), resolutionValueLabel_);
     addMetric(0, 1, tr("FPS"), fpsValueLabel_);
     addMetric(0, 2, tr("Duration"), durationValueLabel_);
-    addMetric(0, 3, tr("Audio"), audioValueLabel_);
-    addMetric(0, 4, tr("Position"), positionValueLabel_);
-    addMetric(0, 5, tr("Preview"), previewModeCombo_);
-    addMetric(1, 0, tr("Shown"), displayedFrameValueLabel_);
-    addMetric(1, 1, tr("Infer"), detectedFrameValueLabel_);
-    addMetric(1, 2, tr("Lag"), previewLagValueLabel_);
-    addMetric(1, 3, tr("Infer FPS"), inferenceFpsValueLabel_);
-    addMetric(1, 4, tr("Detections"), detectionValueLabel_);
-    addMetric(1, 5, tr("Status"), statusValueLabel_);
-    addMetric(2, 0, tr("Storage"), storageValueLabel_);
+    addMetric(1, 0, tr("Position"), positionValueLabel_);
+    addMetric(1, 1, tr("Preview"), previewModeCombo_);
+    addMetric(1, 2, tr("Detections"), detectionValueLabel_);
+    addMetric(2, 0, tr("Shown"), displayedFrameValueLabel_);
+    addMetric(2, 1, tr("Infer"), detectedFrameValueLabel_);
+    addMetric(2, 2, tr("Lag"), previewLagValueLabel_);
+    addMetric(3, 0, tr("Infer FPS"), inferenceFpsValueLabel_);
+    addMetric(3, 1, tr("Status"), statusValueLabel_);
+    addMetric(3, 2, tr("Storage"), storageValueLabel_);
+    metricsLayout->addWidget(createMetricLabel(tr("Runtime")), 4, 0);
+    metricsLayout->addWidget(runtimeSummaryValueLabel_, 4, 1, 1, 5);
+    metricsLayout->setColumnStretch(1, 1);
+    metricsLayout->setColumnStretch(3, 1);
+    metricsLayout->setColumnStretch(5, 1);
 
     QWidget* livePanel = new QWidget();
     livePanel->setMinimumHeight(300);
@@ -722,44 +926,43 @@ void MainWindow::buildUi()
 
     QVBoxLayout* liveLayout = new QVBoxLayout(livePanel);
     liveLayout->setContentsMargins(0, 0, 0, 0);
-    liveLayout->setSpacing(12);
+    liveLayout->setSpacing(10);
     liveLayout->addWidget(fileLabel_);
     liveLayout->addWidget(videoWidget_, 1);
     liveLayout->addWidget(infoPanel);
 
-    QSplitter* bottomSplitter = new QSplitter(Qt::Horizontal);
-    bottomSplitter->setObjectName(QStringLiteral("bottomSplitter"));
-    bottomSplitter->setMinimumHeight(120);
-    bottomSplitter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    bottomSplitter->setChildrenCollapsible(true);
-    bottomSplitter->addWidget(createSettingsPanel());
-    bottomSplitter->addWidget(createHistoryPanel());
-    bottomSplitter->setStretchFactor(0, 1);
-    bottomSplitter->setStretchFactor(1, 2);
-    bottomSplitter->setSizes(QList<int>() << 360 << 720);
+    QTabWidget* bottomTabs = new QTabWidget();
+    bottomTabs->setObjectName(QStringLiteral("inspectorTabs"));
+    bottomTabs->setDocumentMode(true);
+    bottomTabs->setUsesScrollButtons(false);
+    bottomTabs->setMinimumWidth(560);
+    bottomTabs->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    bottomTabs->tabBar()->setDrawBase(false);
+    bottomTabs->addTab(createSettingsPanel(), tr("Parameters"));
+    bottomTabs->addTab(createHistoryPanel(), tr("History"));
+    bottomTabs->addTab(createFaceLibraryPanel(), tr("Faces"));
+    bottomTabs->tabBar()->setElideMode(Qt::ElideRight);
 
-    QSplitter* bodySplitter = new QSplitter(Qt::Vertical);
+    QSplitter* bodySplitter = new QSplitter(Qt::Horizontal);
     bodySplitter->setObjectName(QStringLiteral("bodySplitter"));
-    bodySplitter->setChildrenCollapsible(true);
+    bodySplitter->setChildrenCollapsible(false);
     bodySplitter->setHandleWidth(8);
     bodySplitter->addWidget(livePanel);
-    bodySplitter->addWidget(bottomSplitter);
+    bodySplitter->addWidget(bottomTabs);
     bodySplitter->setCollapsible(0, false);
-    bodySplitter->setCollapsible(1, true);
-    // Give automatic relayouts to the preview first; users can still drag the
-    // lower panel taller when they are querying parameters or history.
-    bodySplitter->setStretchFactor(0, 1);
-    bodySplitter->setStretchFactor(1, 0);
-    bodySplitter->setSizes(QList<int>() << 660 << 180);
+    bodySplitter->setCollapsible(1, false);
+    bodySplitter->setStretchFactor(0, 3);
+    bodySplitter->setStretchFactor(1, 2);
+    bodySplitter->setSizes(QList<int>() << 880 << 560);
 
     QVBoxLayout* mainLayout = new QVBoxLayout(centralWidget);
-    mainLayout->setContentsMargins(24, 20, 24, 24);
-    mainLayout->setSpacing(16);
+    mainLayout->setContentsMargins(18, 16, 18, 18);
+    mainLayout->setSpacing(12);
     mainLayout->addLayout(headerLayout);
     mainLayout->addWidget(bodySplitter, 1);
 
-    setWindowTitle(tr("Industrial Vision Platform"));
-    resize(1280, 860);
+    setWindowTitle(tr("Face Recognition Platform"));
+    resize(1440, 900);
 }
 
 QWidget* MainWindow::createSettingsPanel()
@@ -767,60 +970,84 @@ QWidget* MainWindow::createSettingsPanel()
     QFrame* panel = new QFrame();
     panel->setObjectName(QStringLiteral("settingsPanel"));
 
-    QLabel* title = new QLabel(tr("Detection Parameters"), panel);
-    title->setObjectName(QStringLiteral("panelTitle"));
+    auto createSectionTitle = [](const QString& text) {
+        QLabel* label = new QLabel(text);
+        label->setObjectName(QStringLiteral("sectionTitle"));
+        return label;
+    };
 
-    detectorBackendCombo_ = new QComboBox(panel);
-    detectorBackendCombo_->addItem(tr("Mock"), static_cast<int>(ivp::DetectorBackend::Mock));
-    detectorBackendCombo_->addItem(tr("OpenCV DNN"), static_cast<int>(ivp::DetectorBackend::OpenCVDnn));
-    detectorBackendCombo_->addItem(tr("TensorRT"), static_cast<int>(ivp::DetectorBackend::TensorRT));
+    QLabel* title = new QLabel(tr("Model Settings"), panel);
+    title->setObjectName(QStringLiteral("panelTitle"));
 
     confidenceSpinBox_ = new QDoubleSpinBox(panel);
     confidenceSpinBox_->setRange(0.0, 1.0);
     confidenceSpinBox_->setDecimals(2);
     confidenceSpinBox_->setSingleStep(0.05);
+    styleNumericSpin(confidenceSpinBox_);
 
     nmsSpinBox_ = new QDoubleSpinBox(panel);
     nmsSpinBox_->setRange(0.0, 1.0);
     nmsSpinBox_->setDecimals(2);
     nmsSpinBox_->setSingleStep(0.05);
+    styleNumericSpin(nmsSpinBox_);
 
     maxDetectionsSpinBox_ = new QSpinBox(panel);
     maxDetectionsSpinBox_->setRange(1, 10000);
+    styleNumericSpin(maxDetectionsSpinBox_);
 
     inputWidthSpinBox_ = new QSpinBox(panel);
     inputWidthSpinBox_->setRange(32, 4096);
     inputWidthSpinBox_->setSingleStep(32);
+    styleNumericSpin(inputWidthSpinBox_);
 
     inputHeightSpinBox_ = new QSpinBox(panel);
     inputHeightSpinBox_->setRange(32, 4096);
     inputHeightSpinBox_->setSingleStep(32);
+    styleNumericSpin(inputHeightSpinBox_);
 
     classCountSpinBox_ = new QSpinBox(panel);
     classCountSpinBox_->setRange(0, 10000);
+    styleNumericSpin(classCountSpinBox_);
 
     detectEverySpinBox_ = new QSpinBox(panel);
     detectEverySpinBox_->setRange(1, 1000);
-
-    mockDelaySpinBox_ = new QSpinBox(panel);
-    mockDelaySpinBox_->setRange(0, 1000);
-
-    imageSequenceFpsSpinBox_ = new QDoubleSpinBox(panel);
-    imageSequenceFpsSpinBox_->setRange(1.0, 120.0);
-    imageSequenceFpsSpinBox_->setDecimals(1);
-    imageSequenceFpsSpinBox_->setSingleStep(1.0);
-    imageSequenceFpsSpinBox_->setValue(10.0);
+    styleNumericSpin(detectEverySpinBox_);
 
     onnxPathEdit_ = new QLineEdit(panel);
-    enginePathEdit_ = new QLineEdit(panel);
     labelsPathEdit_ = new QLineEdit(panel);
+    faceFeatureModelPathEdit_ = new QLineEdit(panel);
+    faceFeatureModelPathEdit_->setReadOnly(true);
     onnxBrowseButton_ = new QPushButton(tr("..."), panel);
-    engineBrowseButton_ = new QPushButton(tr("..."), panel);
     labelsBrowseButton_ = new QPushButton(tr("..."), panel);
-    applyDetectorButton_ = new QPushButton(tr("Apply Parameters"), panel);
-    facePresetButton_ = new QPushButton(tr("Face Preset"), panel);
-    clearOverlayButton_ = new QPushButton(tr("Clear Overlay"), panel);
-    restoreDefaultsButton_ = new QPushButton(tr("Restore Defaults"), panel);
+    styleLineEdit(onnxPathEdit_, 240);
+    styleLineEdit(labelsPathEdit_, 240);
+    styleLineEdit(faceFeatureModelPathEdit_, 240);
+    styleBrowseButton(onnxBrowseButton_);
+    styleBrowseButton(labelsBrowseButton_);
+    applyDetectorButton_ = new QPushButton(tr("Apply"), panel);
+    facePresetButton_ = new QPushButton(tr("Face"), panel);
+    clearOverlayButton_ = new QPushButton(tr("Clear"), panel);
+    restoreDefaultsButton_ = new QPushButton(tr("Reset"), panel);
+    styleActionButton(
+        applyDetectorButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogApplyButton),
+        tr("Apply detector parameters"),
+        92);
+    styleActionButton(
+        facePresetButton_,
+        qApp->style()->standardIcon(QStyle::SP_FileDialogContentsView),
+        tr("Load the bundled face detector preset"),
+        92);
+    styleActionButton(
+        clearOverlayButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogResetButton),
+        tr("Clear the current overlay"),
+        92);
+    styleActionButton(
+        restoreDefaultsButton_,
+        qApp->style()->standardIcon(QStyle::SP_BrowserReload),
+        tr("Restore saved defaults"),
+        92);
     exportResultsCheck_ = new QCheckBox(tr("Export results"), panel);
     exportFormatCombo_ = new QComboBox(panel);
     exportFormatCombo_->addItem(
@@ -831,70 +1058,176 @@ QWidget* MainWindow::createSettingsPanel()
         static_cast<int>(ivp::ResultExportFormat::Csv));
     exportDirectoryEdit_ = new QLineEdit(panel);
     exportBrowseButton_ = new QPushButton(tr("..."), panel);
+    styleLineEdit(exportDirectoryEdit_, 240);
+    styleBrowseButton(exportBrowseButton_);
+    styleComboBox(exportFormatCombo_, 150);
     includeEmptyFramesCheck_ = new QCheckBox(tr("Include empty frames"), panel);
     networkPublishCheck_ = new QCheckBox(tr("Publish over TCP"), panel);
     networkHostEdit_ = new QLineEdit(panel);
     networkPortSpinBox_ = new QSpinBox(panel);
     networkPortSpinBox_->setRange(1, 65535);
+    styleLineEdit(networkHostEdit_, 180);
+    styleNumericSpin(networkPortSpinBox_, 96);
+    faceFeatureModelStatusLabel_ = createMetricValue(tr("Checking..."));
+    faceFeatureModelStatusLabel_->setWordWrap(true);
+    faceFeatureModelStatusLabel_->setSizePolicy(
+        QSizePolicy::Expanding,
+        QSizePolicy::Preferred);
+    faceRecognitionThresholdSpinBox_ = new QDoubleSpinBox(panel);
+    faceRecognitionThresholdSpinBox_->setRange(0.0, 1.0);
+    faceRecognitionThresholdSpinBox_->setDecimals(3);
+    faceRecognitionThresholdSpinBox_->setSingleStep(0.01);
+    styleNumericSpin(faceRecognitionThresholdSpinBox_);
+    faceRecognitionThresholdSpinBox_->setToolTip(
+        tr("Higher values make face matching stricter."));
+    faceRecognitionMarginSpinBox_ = new QDoubleSpinBox(panel);
+    faceRecognitionMarginSpinBox_->setRange(0.0, 1.0);
+    faceRecognitionMarginSpinBox_->setDecimals(3);
+    faceRecognitionMarginSpinBox_->setSingleStep(0.01);
+    styleNumericSpin(faceRecognitionMarginSpinBox_);
+    faceRecognitionMarginSpinBox_->setToolTip(
+        tr("Minimum gap between the best and second-best face match."));
+    faceRecognitionMinFaceSizeSpinBox_ = new QSpinBox(panel);
+    faceRecognitionMinFaceSizeSpinBox_->setRange(1, 4096);
+    faceRecognitionMinFaceSizeSpinBox_->setSingleStep(2);
+    styleNumericSpin(faceRecognitionMinFaceSizeSpinBox_);
+    faceRecognitionMinFaceSizeSpinBox_->setToolTip(
+        tr("Ignore face boxes smaller than this size."));
+    faceRecognitionPaddingSpinBox_ = new QDoubleSpinBox(panel);
+    faceRecognitionPaddingSpinBox_->setRange(0.0, 1.0);
+    faceRecognitionPaddingSpinBox_->setDecimals(2);
+    faceRecognitionPaddingSpinBox_->setSingleStep(0.05);
+    styleNumericSpin(faceRecognitionPaddingSpinBox_);
+    faceRecognitionPaddingSpinBox_->setToolTip(
+        tr("Extra padding ratio added around detected faces when extracting features."));
+    faceRecognitionApplyButton_ = new QPushButton(tr("Apply"), panel);
+    styleActionButton(
+        faceRecognitionApplyButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogApplyButton),
+        tr("Apply the face recognition parameters"),
+        92);
     deliveryStatusLabel_ = createMetricValue(tr("Idle"));
     controlStatusLabel_ = createMetricValue(tr("Control service idle"));
-    onnxBrowseButton_->setObjectName(QStringLiteral("browseButton"));
-    engineBrowseButton_->setObjectName(QStringLiteral("browseButton"));
-    labelsBrowseButton_->setObjectName(QStringLiteral("browseButton"));
-    exportBrowseButton_->setObjectName(QStringLiteral("browseButton"));
-
-    QGridLayout* grid = new QGridLayout();
-    grid->setContentsMargins(0, 0, 0, 0);
-    grid->setHorizontalSpacing(10);
-    grid->setVerticalSpacing(8);
-
-    int row = 0;
-    const auto addField = [&grid, &row](const QString& label, QWidget* widget) {
-        grid->addWidget(createMetricLabel(label), row, 0);
-        grid->addWidget(widget, row, 1, 1, 3);
-        ++row;
-    };
-    const auto addPair = [&grid, &row](const QString& leftLabel, QWidget* leftWidget,
-                                       const QString& rightLabel, QWidget* rightWidget) {
-        grid->addWidget(createMetricLabel(leftLabel), row, 0);
-        grid->addWidget(leftWidget, row, 1);
-        grid->addWidget(createMetricLabel(rightLabel), row, 2);
-        grid->addWidget(rightWidget, row, 3);
-        ++row;
-    };
-    const auto addPath = [&grid, &row](const QString& label, QLineEdit* edit, QPushButton* button) {
-        grid->addWidget(createMetricLabel(label), row, 0);
-        grid->addWidget(edit, row, 1, 1, 2);
-        grid->addWidget(button, row, 3);
-        ++row;
-    };
-
-    addField(tr("Backend"), detectorBackendCombo_);
-    addPair(tr("Confidence"), confidenceSpinBox_, tr("NMS"), nmsSpinBox_);
-    addPair(tr("Max"), maxDetectionsSpinBox_, tr("Every N"), detectEverySpinBox_);
-    addPair(tr("Input W"), inputWidthSpinBox_, tr("Input H"), inputHeightSpinBox_);
-    addPair(tr("Classes"), classCountSpinBox_, tr("Mock ms"), mockDelaySpinBox_);
-    addField(tr("Image FPS"), imageSequenceFpsSpinBox_);
-    addPath(tr("ONNX"), onnxPathEdit_, onnxBrowseButton_);
-    addPath(tr("Engine"), enginePathEdit_, engineBrowseButton_);
-    addPath(tr("Labels"), labelsPathEdit_, labelsBrowseButton_);
-    grid->addWidget(createMetricLabel(tr("Result Delivery")), row, 0, 1, 4);
-    ++row;
-    addPair(tr("Export"), exportResultsCheck_, tr("Format"), exportFormatCombo_);
-    addPath(tr("Export Dir"), exportDirectoryEdit_, exportBrowseButton_);
-    addPair(tr("Empty"), includeEmptyFramesCheck_, tr("TCP"), networkPublishCheck_);
-    addPair(tr("Host"), networkHostEdit_, tr("Port"), networkPortSpinBox_);
-    addField(tr("Status"), deliveryStatusLabel_);
-    grid->addWidget(createMetricLabel(tr("Control Service")), row, 0, 1, 4);
-    ++row;
-    addField(tr("Endpoint"), controlStatusLabel_);
-    grid->setColumnStretch(1, 1);
 
     QVBoxLayout* panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(18, 14, 18, 14);
-    panelLayout->setSpacing(12);
+    panelLayout->setSpacing(14);
     panelLayout->addWidget(title);
-    panelLayout->addLayout(grid);
+
+    panelLayout->addWidget(createSectionTitle(tr("Face Detector")));
+
+    QGridLayout* modelGrid = new QGridLayout();
+    modelGrid->setContentsMargins(0, 0, 0, 0);
+    modelGrid->setHorizontalSpacing(10);
+    modelGrid->setVerticalSpacing(8);
+    int modelRow = 0;
+    const auto addModelField = [&modelGrid, &modelRow](const QString& label, QWidget* widget) {
+        modelGrid->addWidget(createMetricLabel(label), modelRow, 0);
+        modelGrid->addWidget(widget, modelRow, 1, 1, 3);
+        ++modelRow;
+    };
+    const auto addModelPair = [&modelGrid, &modelRow](
+                                   const QString& leftLabel, QWidget* leftWidget,
+                                   const QString& rightLabel, QWidget* rightWidget) {
+        modelGrid->addWidget(createMetricLabel(leftLabel), modelRow, 0);
+        modelGrid->addWidget(leftWidget, modelRow, 1);
+        modelGrid->addWidget(createMetricLabel(rightLabel), modelRow, 2);
+        modelGrid->addWidget(rightWidget, modelRow, 3);
+        ++modelRow;
+    };
+    const auto addModelPath = [&modelGrid, &modelRow](
+                                   const QString& label, QLineEdit* edit, QPushButton* button) {
+        modelGrid->addWidget(createMetricLabel(label), modelRow, 0);
+        modelGrid->addWidget(edit, modelRow, 1, 1, 2);
+        modelGrid->addWidget(button, modelRow, 3);
+        ++modelRow;
+    };
+
+    addModelPair(tr("Confidence"), confidenceSpinBox_, tr("NMS"), nmsSpinBox_);
+    addModelPair(tr("Max"), maxDetectionsSpinBox_, tr("Every N"), detectEverySpinBox_);
+    addModelPair(tr("Input W"), inputWidthSpinBox_, tr("Input H"), inputHeightSpinBox_);
+    addModelField(tr("Classes"), classCountSpinBox_);
+    addModelPath(tr("Detector ONNX"), onnxPathEdit_, onnxBrowseButton_);
+    addModelPath(tr("Labels"), labelsPathEdit_, labelsBrowseButton_);
+    modelGrid->setColumnStretch(1, 1);
+    panelLayout->addLayout(modelGrid);
+
+    panelLayout->addWidget(createSectionTitle(tr("Face Recognition")));
+
+    QGridLayout* recognitionGrid = new QGridLayout();
+    recognitionGrid->setContentsMargins(0, 0, 0, 0);
+    recognitionGrid->setHorizontalSpacing(10);
+    recognitionGrid->setVerticalSpacing(8);
+    recognitionGrid->addWidget(createMetricLabel(tr("Feature ONNX")), 0, 0);
+    recognitionGrid->addWidget(faceFeatureModelPathEdit_, 0, 1, 1, 3);
+    recognitionGrid->addWidget(createMetricLabel(tr("Similarity")), 1, 0);
+    recognitionGrid->addWidget(faceRecognitionThresholdSpinBox_, 1, 1);
+    recognitionGrid->addWidget(createMetricLabel(tr("Margin")), 1, 2);
+    recognitionGrid->addWidget(faceRecognitionMarginSpinBox_, 1, 3);
+    recognitionGrid->addWidget(createMetricLabel(tr("Min Face")), 2, 0);
+    recognitionGrid->addWidget(faceRecognitionMinFaceSizeSpinBox_, 2, 1);
+    recognitionGrid->addWidget(createMetricLabel(tr("Padding")), 2, 2);
+    recognitionGrid->addWidget(faceRecognitionPaddingSpinBox_, 2, 3);
+    recognitionGrid->addWidget(createMetricLabel(tr("Status")), 3, 0);
+    recognitionGrid->addWidget(faceFeatureModelStatusLabel_, 3, 1, 1, 3);
+    recognitionGrid->setColumnStretch(1, 1);
+    recognitionGrid->setColumnStretch(3, 1);
+    panelLayout->addLayout(recognitionGrid);
+    QHBoxLayout* recognitionActionsLayout = new QHBoxLayout();
+    recognitionActionsLayout->setContentsMargins(0, 0, 0, 0);
+    recognitionActionsLayout->setSpacing(10);
+    recognitionActionsLayout->addStretch();
+    recognitionActionsLayout->addWidget(faceRecognitionApplyButton_);
+    panelLayout->addLayout(recognitionActionsLayout);
+
+    panelLayout->addWidget(createSectionTitle(tr("Result Output")));
+
+    QGridLayout* outputGrid = new QGridLayout();
+    outputGrid->setContentsMargins(0, 0, 0, 0);
+    outputGrid->setHorizontalSpacing(10);
+    outputGrid->setVerticalSpacing(8);
+    int outputRow = 0;
+    const auto addOutputField = [&outputGrid, &outputRow](const QString& label, QWidget* widget) {
+        outputGrid->addWidget(createMetricLabel(label), outputRow, 0);
+        outputGrid->addWidget(widget, outputRow, 1, 1, 3);
+        ++outputRow;
+    };
+    const auto addOutputPair = [&outputGrid, &outputRow](
+                                    const QString& leftLabel, QWidget* leftWidget,
+                                    const QString& rightLabel, QWidget* rightWidget) {
+        outputGrid->addWidget(createMetricLabel(leftLabel), outputRow, 0);
+        outputGrid->addWidget(leftWidget, outputRow, 1);
+        outputGrid->addWidget(createMetricLabel(rightLabel), outputRow, 2);
+        outputGrid->addWidget(rightWidget, outputRow, 3);
+        ++outputRow;
+    };
+    const auto addOutputPath = [&outputGrid, &outputRow](
+                                    const QString& label, QLineEdit* edit, QPushButton* button) {
+        outputGrid->addWidget(createMetricLabel(label), outputRow, 0);
+        outputGrid->addWidget(edit, outputRow, 1, 1, 2);
+        outputGrid->addWidget(button, outputRow, 3);
+        ++outputRow;
+    };
+
+    addOutputPair(tr("Export"), exportResultsCheck_, tr("Format"), exportFormatCombo_);
+    addOutputPath(tr("Export Dir"), exportDirectoryEdit_, exportBrowseButton_);
+    addOutputPair(tr("Empty"), includeEmptyFramesCheck_, tr("TCP"), networkPublishCheck_);
+    addOutputPair(tr("Host"), networkHostEdit_, tr("Port"), networkPortSpinBox_);
+    addOutputField(tr("Status"), deliveryStatusLabel_);
+    outputGrid->setColumnStretch(1, 1);
+    panelLayout->addLayout(outputGrid);
+
+    panelLayout->addWidget(createSectionTitle(tr("Remote Control")));
+
+    QGridLayout* controlGrid = new QGridLayout();
+    controlGrid->setContentsMargins(0, 0, 0, 0);
+    controlGrid->setHorizontalSpacing(10);
+    controlGrid->setVerticalSpacing(8);
+    controlGrid->addWidget(createMetricLabel(tr("Status")), 0, 0);
+    controlGrid->addWidget(controlStatusLabel_, 0, 1, 1, 3);
+    controlGrid->setColumnStretch(1, 1);
+    panelLayout->addLayout(controlGrid);
+
     QHBoxLayout* settingsActionsLayout = new QHBoxLayout();
     settingsActionsLayout->setContentsMargins(0, 0, 0, 0);
     settingsActionsLayout->setSpacing(10);
@@ -923,6 +1256,12 @@ QWidget* MainWindow::createHistoryPanel()
     QFrame* panel = new QFrame();
     panel->setObjectName(QStringLiteral("historyPanel"));
 
+    auto createSectionTitle = [](const QString& text) {
+        QLabel* label = new QLabel(text);
+        label->setObjectName(QStringLiteral("sectionTitle"));
+        return label;
+    };
+
     historyModel_ = new DetectionHistoryTableModel(this);
     historyTableView_ = new QTableView(panel);
     historyTableView_->setModel(historyModel_);
@@ -935,15 +1274,34 @@ QWidget* MainWindow::createHistoryPanel()
     historyTableView_->horizontalHeader()->setStretchLastSection(true);
     historyTableView_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     historyTableView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    historyTableView_->setMinimumHeight(90);
+    historyTableView_->setMinimumHeight(80);
     historyTableView_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
+    historyFaceCombo_ = new QComboBox(panel);
+    styleComboBox(historyFaceCombo_, 200);
+    historyFaceBindButton_ = new QPushButton(tr("Bind"), panel);
+    historyFaceClearButton_ = new QPushButton(tr("Clear"), panel);
+    styleActionButton(
+        historyFaceBindButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogApplyButton),
+        tr("Bind the selected history record to a face"),
+        78);
+    styleActionButton(
+        historyFaceClearButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogResetButton),
+        tr("Clear the selected binding"),
+        78);
+    historyFaceBindButton_->setEnabled(false);
+    historyFaceClearButton_->setEnabled(false);
+
     historySessionCombo_ = new QComboBox(panel);
-    historySessionCombo_->setMinimumWidth(240);
+    styleComboBox(historySessionCombo_, 200);
     historySourceEdit_ = new QLineEdit(panel);
-    historySourceEdit_->setPlaceholderText(tr("Source contains"));
+    historySourceEdit_->setPlaceholderText(tr("Source"));
     historyClassEdit_ = new QLineEdit(panel);
-    historyClassEdit_->setPlaceholderText(tr("Class contains"));
+    historyClassEdit_->setPlaceholderText(tr("Class"));
+    styleLineEdit(historySourceEdit_, 220);
+    styleLineEdit(historyClassEdit_, 220);
     historyStartCheck_ = new QCheckBox(tr("After"), panel);
     historyEndCheck_ = new QCheckBox(tr("Before"), panel);
     historyStartEdit_ = new QDateTimeEdit(QDateTime::currentDateTime().addDays(-1), panel);
@@ -958,39 +1316,202 @@ QWidget* MainWindow::createHistoryPanel()
     historyLimitSpinBox_->setRange(10, 5000);
     historyLimitSpinBox_->setSingleStep(50);
     historyLimitSpinBox_->setValue(200);
+    styleNumericSpin(historyLimitSpinBox_, 100);
+    historyStartEdit_->setMinimumWidth(200);
+    historyStartEdit_->setMinimumHeight(32);
+    historyStartEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    installWheelBlocker(historyStartEdit_);
+    historyEndEdit_->setMinimumWidth(200);
+    historyEndEdit_->setMinimumHeight(32);
+    historyEndEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    installWheelBlocker(historyEndEdit_);
     historyRefreshButton_ = new QPushButton(tr("Refresh"), panel);
-    historyClearButton_ = new QPushButton(tr("Clear Filters"), panel);
+    historyClearButton_ = new QPushButton(tr("Clear"), panel);
+    styleActionButton(
+        historyRefreshButton_,
+        qApp->style()->standardIcon(QStyle::SP_BrowserReload),
+        tr("Refresh history"),
+        84);
+    styleActionButton(
+        historyClearButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogResetButton),
+        tr("Clear all filters"),
+        84);
     historyStatusLabel_ = createMetricValue(tr("0 records"));
     historyStatusLabel_->setObjectName(QStringLiteral("historyStatusLabel"));
 
-    QHBoxLayout* filterLayout = new QHBoxLayout();
+    QHBoxLayout* associationLayout = new QHBoxLayout();
+    associationLayout->setContentsMargins(0, 0, 0, 0);
+    associationLayout->setSpacing(10);
+    associationLayout->addWidget(createMetricLabel(tr("Face")));
+    associationLayout->addWidget(historyFaceCombo_);
+    associationLayout->addWidget(historyFaceBindButton_);
+    associationLayout->addWidget(historyFaceClearButton_);
+    associationLayout->addStretch();
+
+    QVBoxLayout* filterLayout = new QVBoxLayout();
     filterLayout->setContentsMargins(0, 0, 0, 0);
-    filterLayout->setSpacing(10);
-    filterLayout->addWidget(historySessionCombo_);
-    filterLayout->addWidget(historySourceEdit_, 1);
-    filterLayout->addWidget(historyClassEdit_, 1);
-    filterLayout->addWidget(historyStartCheck_);
-    filterLayout->addWidget(historyStartEdit_);
-    filterLayout->addWidget(historyEndCheck_);
-    filterLayout->addWidget(historyEndEdit_);
-    filterLayout->addWidget(createMetricLabel(tr("Limit")));
-    filterLayout->addWidget(historyLimitSpinBox_);
-    filterLayout->addWidget(historyRefreshButton_);
-    filterLayout->addWidget(historyClearButton_);
+    filterLayout->setSpacing(8);
+
+    QHBoxLayout* sessionFilterLayout = new QHBoxLayout();
+    sessionFilterLayout->setContentsMargins(0, 0, 0, 0);
+    sessionFilterLayout->setSpacing(10);
+    sessionFilterLayout->addWidget(createMetricLabel(tr("Session")));
+    sessionFilterLayout->addWidget(historySessionCombo_, 1);
+    filterLayout->addLayout(sessionFilterLayout);
+
+    QHBoxLayout* textFilterLayout = new QHBoxLayout();
+    textFilterLayout->setContentsMargins(0, 0, 0, 0);
+    textFilterLayout->setSpacing(10);
+    textFilterLayout->addWidget(historySourceEdit_, 1);
+    textFilterLayout->addWidget(historyClassEdit_, 1);
+    filterLayout->addLayout(textFilterLayout);
+
+    QHBoxLayout* startRangeLayout = new QHBoxLayout();
+    startRangeLayout->setContentsMargins(0, 0, 0, 0);
+    startRangeLayout->setSpacing(10);
+    startRangeLayout->addWidget(historyStartCheck_);
+    startRangeLayout->addWidget(historyStartEdit_, 1);
+    filterLayout->addLayout(startRangeLayout);
+
+    QHBoxLayout* endRangeLayout = new QHBoxLayout();
+    endRangeLayout->setContentsMargins(0, 0, 0, 0);
+    endRangeLayout->setSpacing(10);
+    endRangeLayout->addWidget(historyEndCheck_);
+    endRangeLayout->addWidget(historyEndEdit_, 1);
+    filterLayout->addLayout(endRangeLayout);
+
+    QHBoxLayout* queryActionsLayout = new QHBoxLayout();
+    queryActionsLayout->setContentsMargins(0, 0, 0, 0);
+    queryActionsLayout->setSpacing(10);
+    queryActionsLayout->addWidget(createMetricLabel(tr("Limit")));
+    queryActionsLayout->addWidget(historyLimitSpinBox_);
+    queryActionsLayout->addStretch();
+    queryActionsLayout->addWidget(historyRefreshButton_);
+    queryActionsLayout->addWidget(historyClearButton_);
+    filterLayout->addLayout(queryActionsLayout);
 
     QHBoxLayout* statusLayout = new QHBoxLayout();
     statusLayout->setContentsMargins(0, 0, 0, 0);
     statusLayout->setSpacing(10);
-    statusLayout->addWidget(createMetricLabel(tr("History")));
+    statusLayout->addWidget(createMetricLabel(tr("Status")));
     statusLayout->addWidget(historyStatusLabel_);
     statusLayout->addStretch();
 
     QVBoxLayout* panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(18, 14, 18, 14);
-    panelLayout->setSpacing(12);
+    panelLayout->setSpacing(10);
+    panelLayout->addWidget(createSectionTitle(tr("Association")));
+    panelLayout->addLayout(associationLayout);
+    panelLayout->addWidget(createSectionTitle(tr("Query")));
     panelLayout->addLayout(filterLayout);
     panelLayout->addWidget(historyTableView_, 1);
     panelLayout->addLayout(statusLayout);
+
+    return panel;
+}
+
+QWidget* MainWindow::createFaceLibraryPanel()
+{
+    QFrame* panel = new QFrame();
+    panel->setObjectName(QStringLiteral("faceLibraryPanel"));
+
+    faceLibraryModel_ = new FaceLibraryTableModel(this);
+    faceLibraryTableView_ = new QTableView(panel);
+    faceLibraryTableView_->setModel(faceLibraryModel_);
+    faceLibraryTableView_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    faceLibraryTableView_->setSelectionMode(QAbstractItemView::SingleSelection);
+    faceLibraryTableView_->setAlternatingRowColors(true);
+    faceLibraryTableView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    faceLibraryTableView_->setSortingEnabled(false);
+    faceLibraryTableView_->verticalHeader()->setVisible(false);
+    faceLibraryTableView_->horizontalHeader()->setStretchLastSection(true);
+    faceLibraryTableView_->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    faceLibraryTableView_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    faceLibraryTableView_->setMinimumHeight(120);
+    faceLibraryTableView_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    faceCodeEdit_ = new QLineEdit(panel);
+    faceCodeEdit_->setPlaceholderText(tr("person_001"));
+    styleLineEdit(faceCodeEdit_, 220);
+    faceNameEdit_ = new QLineEdit(panel);
+    faceNameEdit_->setPlaceholderText(tr("Display name"));
+    styleLineEdit(faceNameEdit_, 220);
+    faceImagePathEdit_ = new QLineEdit(panel);
+    faceImagePathEdit_->setPlaceholderText(tr("Reference image or folder"));
+    styleLineEdit(faceImagePathEdit_, 240);
+    faceNotesEdit_ = new QLineEdit(panel);
+    faceNotesEdit_->setPlaceholderText(tr("Notes"));
+    styleLineEdit(faceNotesEdit_, 240);
+    faceImageBrowseButton_ = new QPushButton(tr("..."), panel);
+    styleBrowseButton(faceImageBrowseButton_);
+    faceAddButton_ = new QPushButton(tr("Add"), panel);
+    faceRemoveButton_ = new QPushButton(tr("Remove"), panel);
+    faceRefreshButton_ = new QPushButton(tr("Refresh"), panel);
+    styleActionButton(
+        faceAddButton_,
+        qApp->style()->standardIcon(QStyle::SP_FileDialogNewFolder),
+        tr("Add a face identity"),
+        78);
+    styleActionButton(
+        faceRemoveButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogDiscardButton),
+        tr("Remove the selected face identity"),
+        92);
+    styleActionButton(
+        faceRefreshButton_,
+        qApp->style()->standardIcon(QStyle::SP_BrowserReload),
+        tr("Refresh the face library"),
+        84);
+    faceLibraryStatusLabel_ = createMetricValue(tr("0 faces"));
+    faceRecognitionStatusLabel_ = createMetricValue(tr("Checking..."));
+    faceRecognitionStatusLabel_->setWordWrap(true);
+    faceRecognitionStatusLabel_->setSizePolicy(
+        QSizePolicy::Expanding,
+        QSizePolicy::Preferred);
+
+    QGridLayout* formLayout = new QGridLayout();
+    formLayout->setContentsMargins(0, 0, 0, 0);
+    formLayout->setHorizontalSpacing(10);
+    formLayout->setVerticalSpacing(8);
+    formLayout->addWidget(createMetricLabel(tr("Code")), 0, 0);
+    formLayout->addWidget(faceCodeEdit_, 0, 1);
+    formLayout->addWidget(createMetricLabel(tr("Name")), 0, 2);
+    formLayout->addWidget(faceNameEdit_, 0, 3);
+    formLayout->addWidget(createMetricLabel(tr("Image")), 1, 0);
+    formLayout->addWidget(faceImagePathEdit_, 1, 1, 1, 2);
+    formLayout->addWidget(faceImageBrowseButton_, 1, 3);
+    formLayout->addWidget(createMetricLabel(tr("Notes")), 2, 0);
+    formLayout->addWidget(faceNotesEdit_, 2, 1, 1, 3);
+    formLayout->setColumnStretch(1, 1);
+    formLayout->setColumnStretch(3, 1);
+
+    QHBoxLayout* actionLayout = new QHBoxLayout();
+    actionLayout->setContentsMargins(0, 0, 0, 0);
+    actionLayout->setSpacing(10);
+    actionLayout->addWidget(faceAddButton_);
+    actionLayout->addWidget(faceRemoveButton_);
+    actionLayout->addWidget(faceRefreshButton_);
+    actionLayout->addStretch();
+
+    QGridLayout* statusGrid = new QGridLayout();
+    statusGrid->setContentsMargins(0, 0, 0, 0);
+    statusGrid->setHorizontalSpacing(10);
+    statusGrid->setVerticalSpacing(6);
+    statusGrid->addWidget(createMetricLabel(tr("Library")), 0, 0);
+    statusGrid->addWidget(faceLibraryStatusLabel_, 0, 1);
+    statusGrid->addWidget(createMetricLabel(tr("Recognition")), 1, 0);
+    statusGrid->addWidget(faceRecognitionStatusLabel_, 1, 1);
+    statusGrid->setColumnStretch(1, 1);
+
+    QVBoxLayout* panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(18, 14, 18, 14);
+    panelLayout->setSpacing(10);
+    panelLayout->addWidget(createMetricLabel(tr("Face Library")));
+    panelLayout->addLayout(formLayout);
+    panelLayout->addLayout(actionLayout);
+    panelLayout->addLayout(statusGrid);
+    panelLayout->addWidget(faceLibraryTableView_, 1);
 
     return panel;
 }
@@ -999,98 +1520,165 @@ void MainWindow::applyStyle()
 {
     qApp->setStyleSheet(QStringLiteral(R"(
         QMainWindow {
-            background: #111615;
+            background: #0D1117;
         }
 
         QLabel {
-            color: #E2EAE5;
+            color: #DCE5EE;
             font-size: 14px;
         }
 
         #titleLabel {
-            color: #F7FAF8;
-            font-size: 24px;
+            color: #F5F8FC;
+            font-size: 26px;
             font-weight: 700;
         }
 
         #fileLabel {
-            color: #94A69C;
-            padding-left: 2px;
+            color: #8D9AAA;
+            padding: 2px 4px 4px 4px;
         }
 
         #videoSurface {
-            background: #080B0A;
-            border: 1px solid #38463F;
+            background: #080B10;
+            border: 1px solid #2B3948;
             border-radius: 8px;
-            color: #70857A;
+            color: #77889A;
             font-size: 18px;
         }
 
         #infoPanel {
-            background: #1B231F;
-            border: 1px solid #34433B;
+            background: #151D27;
+            border: 1px solid #293848;
             border-radius: 8px;
         }
 
         #historyPanel {
-            background: #151C19;
-            border: 1px solid #324138;
-            border-radius: 8px;
+            background: #131B24;
+            border: 0;
+            border-radius: 0 0 8px 8px;
+        }
+
+        #faceLibraryPanel {
+            background: #131B24;
+            border: 0;
+            border-radius: 0 0 8px 8px;
+        }
+
+        #inspectorTabs {
+            background: transparent;
+            border: 0;
+        }
+
+        QTabWidget {
+            background: transparent;
+            border: 0;
+        }
+
+        QTabWidget::pane {
+            border: 0;
+            border-radius: 0 0 8px 8px;
+            background: #131B24;
+        }
+
+        QTabBar {
+            background: transparent;
+            border: 0;
+            qproperty-drawBase: false;
+        }
+
+        QTabBar::tab {
+            background: #111820;
+            color: #8D9AAA;
+            border: 0;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            min-width: 96px;
+            outline: 0;
+            padding: 9px 14px;
+            margin-right: 4px;
+        }
+
+        QTabBar::tab:selected {
+            background: #182C35;
+            color: #F2F7FC;
+        }
+
+        QTabBar::tab:hover {
+            background: #16212B;
+            color: #F2F7FC;
         }
 
         #settingsPanel {
-            background: #151C19;
-            border: 1px solid #324138;
-            border-radius: 8px;
+            background: #131B24;
+            border: 0;
+            border-radius: 0 0 8px 8px;
+        }
+
+        #settingsScrollArea {
+            background: #131B24;
+            border: 0;
         }
 
         #panelTitle {
-            color: #F2F7F3;
+            color: #F2F7FC;
             font-size: 16px;
             font-weight: 700;
         }
 
+        #sectionTitle {
+            color: #B8C8D9;
+            font-size: 13px;
+            font-weight: 700;
+            padding-top: 4px;
+        }
+
         #metricLabel {
-            color: #8FA399;
+            color: #8495A8;
             font-size: 12px;
             font-weight: 600;
         }
 
         #metricValue {
-            color: #F2F7F3;
+            color: #F2F7FC;
             font-size: 14px;
             font-weight: 600;
         }
 
         #historyStatusLabel {
-            color: #F2F7F3;
+            color: #F2F7FC;
         }
 
         QTableView {
-            background: #0E1411;
-            alternate-background-color: #121915;
-            color: #E7EEE9;
-            gridline-color: #2D3A33;
-            border: 1px solid #2D3A33;
-            selection-background-color: #2E6B57;
+            background: #0E151D;
+            alternate-background-color: #121C26;
+            color: #E4ECF4;
+            gridline-color: #263544;
+            border: 1px solid #2B3948;
+            selection-background-color: #245A68;
             selection-color: #FFFFFF;
         }
 
         QHeaderView::section {
-            background: #22302A;
-            color: #DCE5DF;
+            background: #1A2733;
+            color: #DCE7F2;
             border: 0;
-            border-bottom: 1px solid #33433B;
+            border-bottom: 1px solid #334657;
             padding: 6px 8px;
             font-weight: 600;
         }
 
         QLineEdit, QComboBox, QDateTimeEdit, QSpinBox, QDoubleSpinBox {
-            background: #0F1512;
-            border: 1px solid #33433B;
+            background: #0E151D;
+            border: 1px solid #324456;
             border-radius: 6px;
-            color: #F0F5F1;
+            color: #EFF5FB;
             padding: 7px 10px;
+        }
+
+        QLineEdit:focus, QComboBox:focus, QDateTimeEdit:focus,
+        QSpinBox:focus, QDoubleSpinBox:focus {
+            border-color: #3A93A1;
         }
 
         QComboBox::drop-down {
@@ -1099,63 +1687,83 @@ void MainWindow::applyStyle()
         }
 
         QCheckBox {
-            color: #C8D2CC;
+            color: #C8D4E0;
             spacing: 6px;
         }
 
         QCheckBox::indicator {
             width: 14px;
             height: 14px;
-            border: 1px solid #4B6156;
+            border: 1px solid #52677A;
             border-radius: 3px;
-            background: #0F1512;
+            background: #0E151D;
         }
 
         QCheckBox::indicator:checked {
-            background: #1F8A70;
-            border-color: #42B995;
+            background: #2E9EAA;
+            border-color: #6CC4CF;
         }
 
         QPushButton {
-            background: #25352E;
-            border: 1px solid #3E5A4D;
+            background: #1B2835;
+            border: 1px solid #3A4D60;
             border-radius: 6px;
-            color: #F2F7F3;
-            min-width: 96px;
-            padding: 9px 14px;
+            color: #F2F7FC;
+            min-width: 0px;
+            padding: 7px 12px;
             font-weight: 600;
         }
 
         QPushButton:hover {
-            background: #2E493D;
-            border-color: #5B8A72;
+            background: #243848;
+            border-color: #4F8491;
         }
 
         QPushButton:pressed {
-            background: #1E2B25;
+            background: #14202B;
         }
 
         #primaryButton {
-            background: #1F8A70;
-            border-color: #42B995;
+            background: #2E9EAA;
+            border-color: #6CC4CF;
             color: #FFFFFF;
         }
 
         #primaryButton:hover {
-            background: #28A482;
-            border-color: #6BD1B0;
+            background: #3AB5C0;
+            border-color: #91DCE3;
         }
 
         QPushButton:disabled {
-            background: #1B231F;
-            border-color: #2B3831;
-            color: #5B6E63;
+            background: #151D27;
+            border-color: #263442;
+            color: #647589;
         }
 
         #browseButton {
             min-width: 34px;
             padding-left: 8px;
             padding-right: 8px;
+        }
+
+        QSplitter::handle {
+            background: #0D1117;
+        }
+
+        QScrollBar:vertical {
+            background: #101720;
+            width: 10px;
+            margin: 2px;
+        }
+
+        QScrollBar::handle:vertical {
+            background: #34495C;
+            min-height: 28px;
+            border-radius: 4px;
+        }
+
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
         }
     )"));
 }
@@ -1164,30 +1772,53 @@ void MainWindow::connectSignals()
 {
     connect(openButton_, &QPushButton::clicked, this, &MainWindow::openVideo);
     connect(rtspButton_, &QPushButton::clicked, this, &MainWindow::openRtspStream);
-    connect(imageSequenceButton_, &QPushButton::clicked, this, &MainWindow::openImageSequence);
-    connect(faceDemoButton_, &QPushButton::clicked, this, &MainWindow::openFaceDemo);
     connect(playPauseButton_, &QPushButton::clicked, this, &MainWindow::togglePlayPause);
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopVideo);
     connect(historyRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshHistory);
     connect(historyClearButton_, &QPushButton::clicked, this, &MainWindow::clearHistoryFilters);
+    connect(historyFaceBindButton_, &QPushButton::clicked, this, &MainWindow::bindSelectedHistoryFace);
+    connect(historyFaceClearButton_, &QPushButton::clicked, this, &MainWindow::clearSelectedHistoryFace);
     connect(onnxBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseOnnxPath);
-    connect(engineBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseEnginePath);
     connect(labelsBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseLabelsPath);
     connect(exportBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseExportDirectory);
+    connect(faceImageBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseFaceImagePath);
     connect(applyDetectorButton_, &QPushButton::clicked, this, &MainWindow::applyDetectorSettings);
+    connect(
+        faceRecognitionApplyButton_,
+        &QPushButton::clicked,
+        this,
+        &MainWindow::applyFaceRecognitionSettings);
+    connect(
+        faceRecognitionThresholdSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateFaceRecognitionDiagnostics(); });
+    connect(
+        faceRecognitionMarginSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateFaceRecognitionDiagnostics(); });
+    connect(
+        faceRecognitionMinFaceSizeSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateFaceRecognitionDiagnostics(); });
+    connect(
+        faceRecognitionPaddingSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateFaceRecognitionDiagnostics(); });
     connect(facePresetButton_, &QPushButton::clicked, this, &MainWindow::applyFaceDetectorPreset);
     connect(clearOverlayButton_, &QPushButton::clicked, this, &MainWindow::clearDetectionOverlay);
     connect(restoreDefaultsButton_, &QPushButton::clicked, this, &MainWindow::restoreDefaultSettings);
+    connect(faceAddButton_, &QPushButton::clicked, this, &MainWindow::addFaceIdentity);
+    connect(faceRemoveButton_, &QPushButton::clicked, this, &MainWindow::removeSelectedFaceIdentity);
+    connect(faceRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshFaceLibrary);
     connect(
         previewModeCombo_,
         QOverload<int>::of(&QComboBox::currentIndexChanged),
         this,
         &MainWindow::updatePreviewMode);
-    connect(
-        detectorBackendCombo_,
-        QOverload<int>::of(&QComboBox::currentIndexChanged),
-        this,
-        &MainWindow::updateDetectorParameterState);
     connect(historySourceEdit_, &QLineEdit::returnPressed, this, &MainWindow::refreshHistory);
     connect(historyClassEdit_, &QLineEdit::returnPressed, this, &MainWindow::refreshHistory);
     connect(historyStartCheck_, &QCheckBox::toggled, historyStartEdit_, &QDateTimeEdit::setEnabled);
@@ -1203,7 +1834,7 @@ void MainWindow::connectSignals()
     connect(&player_, &VideoPlayer::detectionResultsReady, this, &MainWindow::displayDetections);
     connect(&player_, &VideoPlayer::stateChanged, this, &MainWindow::updatePlayerState);
     connect(&player_, &VideoPlayer::videoInfoChanged, this, &MainWindow::updateVideoInfo);
-    connect(&player_, &VideoPlayer::audioInfoChanged, this, &MainWindow::updateAudioInfo);
+    connect(&player_, &VideoPlayer::runtimeStatusChanged, this, &MainWindow::updateRuntimeStatus);
     connect(&player_, &VideoPlayer::errorOccurred, this, &MainWindow::showPlayerError);
     connect(
         &detectionDelivery_,
@@ -1293,6 +1924,25 @@ void MainWindow::applyCurrentDetectorConfig()
     player_.setDetectorConfig(collectDetectorConfig());
 }
 
+bool MainWindow::applyCurrentFaceRecognitionConfig()
+{
+    const ivp::FaceRecognitionConfig config = collectFaceRecognitionConfig();
+    if (!player_.applyFaceRecognitionConfig(config))
+    {
+        const QString message = player_.lastError().isEmpty()
+            ? tr("Could not apply face recognition parameters.")
+            : player_.lastError();
+        QMessageBox::warning(this, tr("Face Recognition Parameters"), message);
+        statusValueLabel_->setText(tr("Recognition Error"));
+        return false;
+    }
+
+    faceReferenceRecognizer_.initialize(config);
+    reloadFaceRecognitionGallery();
+    updateFaceRecognitionDiagnostics();
+    return true;
+}
+
 void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
 {
     if (config.taskId.has_value())
@@ -1311,22 +1961,6 @@ void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
     // Remote commands reuse the visible UI state so the displayed parameters
     // and the active detector configuration cannot drift apart.
     ivp::DetectorConfig detectorConfig = collectDetectorConfig();
-    if (config.detectorBackend.has_value())
-    {
-        const QString backend = config.detectorBackend->toLower();
-        if (backend == QStringLiteral("tensorrt"))
-        {
-            detectorConfig.backend = ivp::DetectorBackend::TensorRT;
-        }
-        else if (backend == QStringLiteral("opencv_dnn"))
-        {
-            detectorConfig.backend = ivp::DetectorBackend::OpenCVDnn;
-        }
-        else
-        {
-            detectorConfig.backend = ivp::DetectorBackend::Mock;
-        }
-    }
     if (config.confidenceThreshold.has_value())
     {
         detectorConfig.confidenceThreshold = *config.confidenceThreshold;
@@ -1334,10 +1968,6 @@ void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
     if (config.nmsThreshold.has_value())
     {
         detectorConfig.nmsThreshold = *config.nmsThreshold;
-    }
-    if (config.simulatedDelayMs.has_value())
-    {
-        detectorConfig.simulatedDelayMs = *config.simulatedDelayMs;
     }
     if (config.detectEveryNFrames.has_value())
     {
@@ -1363,18 +1993,9 @@ void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
     {
         detectorConfig.onnxPath = config.onnxPath->toStdString();
     }
-    if (config.enginePath.has_value())
-    {
-        detectorConfig.enginePath = config.enginePath->toStdString();
-    }
     if (config.labelsPath.has_value())
     {
         detectorConfig.labelsPath = config.labelsPath->toStdString();
-    }
-
-    if (config.imageSequenceFps.has_value() && imageSequenceFpsSpinBox_ != nullptr)
-    {
-        imageSequenceFpsSpinBox_->setValue(*config.imageSequenceFps);
     }
 
     const bool hasSource = config.sourceType.has_value() && config.sourceUrl.has_value();
@@ -1410,6 +2031,8 @@ void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
     {
         player_.setDetectorConfig(detectorConfig);
     }
+
+    applyCurrentFaceRecognitionConfig();
     saveViewerSettings();
 
     if (!hasSource)
@@ -1442,12 +2065,6 @@ void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
     else if (sourceType == QStringLiteral("rtsp"))
     {
         opened = player_.openRtsp(sourceUrl);
-    }
-    else if (sourceType == QStringLiteral("image_sequence"))
-    {
-        const double fps = config.imageSequenceFps.value_or(
-            imageSequenceFpsSpinBox_ == nullptr ? 10.0 : imageSequenceFpsSpinBox_->value());
-        opened = player_.openImageSequence(sourceUrl, fps);
     }
 
     if (!opened)
@@ -1484,6 +2101,7 @@ void MainWindow::restoreViewerSettings()
         settingsStore_.load(defaultViewerSettings_);
     applyViewerSettingsToUi(settings);
     applyCurrentDetectorConfig();
+    applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
     qDebug() << "Viewer settings path:" << settingsStore_.filePath();
 }
@@ -1500,11 +2118,8 @@ void MainWindow::saveViewerSettings()
 void MainWindow::applyViewerSettingsToUi(const ivp::viewer::ViewerSettings& settings)
 {
     loadDetectorConfig(settings.detectorConfig);
+    loadFaceRecognitionConfig(settings.faceRecognitionConfig);
     loadDeliveryConfig(settings.delivery);
-    if (imageSequenceFpsSpinBox_ != nullptr)
-    {
-        imageSequenceFpsSpinBox_->setValue(settings.imageSequenceFps);
-    }
     updateDetectorParameterState();
 }
 
@@ -1512,9 +2127,7 @@ ivp::viewer::ViewerSettings MainWindow::collectViewerSettings() const
 {
     ivp::viewer::ViewerSettings settings;
     settings.detectorConfig = collectDetectorConfig();
-    settings.imageSequenceFps = imageSequenceFpsSpinBox_ == nullptr
-        ? defaultViewerSettings_.imageSequenceFps
-        : imageSequenceFpsSpinBox_->value();
+    settings.faceRecognitionConfig = collectFaceRecognitionConfig();
     settings.delivery = collectDeliveryConfig();
     return settings;
 }
@@ -1523,18 +2136,13 @@ void MainWindow::restoreDefaultSettings()
 {
     applyViewerSettingsToUi(defaultViewerSettings_);
     applyCurrentDetectorConfig();
+    applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
     saveViewerSettings();
 }
 
 void MainWindow::loadDetectorConfig(const ivp::DetectorConfig& config)
 {
-    if (detectorBackendCombo_ != nullptr)
-    {
-        const int backendValue = static_cast<int>(config.backend);
-        const int index = detectorBackendCombo_->findData(backendValue);
-        detectorBackendCombo_->setCurrentIndex(index >= 0 ? index : 0);
-    }
     if (confidenceSpinBox_ != nullptr)
     {
         confidenceSpinBox_->setValue(config.confidenceThreshold);
@@ -1563,22 +2171,82 @@ void MainWindow::loadDetectorConfig(const ivp::DetectorConfig& config)
     {
         detectEverySpinBox_->setValue(config.detectEveryNFrames);
     }
-    if (mockDelaySpinBox_ != nullptr)
-    {
-        mockDelaySpinBox_->setValue(config.simulatedDelayMs);
-    }
     if (onnxPathEdit_ != nullptr)
     {
         onnxPathEdit_->setText(QString::fromStdString(config.onnxPath));
-    }
-    if (enginePathEdit_ != nullptr)
-    {
-        enginePathEdit_->setText(QString::fromStdString(config.enginePath));
     }
     if (labelsPathEdit_ != nullptr)
     {
         labelsPathEdit_->setText(QString::fromStdString(config.labelsPath));
     }
+}
+
+void MainWindow::loadFaceRecognitionConfig(
+    const ivp::FaceRecognitionConfig& config)
+{
+    if (faceRecognitionThresholdSpinBox_ != nullptr)
+    {
+        faceRecognitionThresholdSpinBox_->setValue(config.similarityThreshold);
+    }
+    if (faceRecognitionMarginSpinBox_ != nullptr)
+    {
+        faceRecognitionMarginSpinBox_->setValue(config.minSimilarityMargin);
+    }
+    if (faceRecognitionMinFaceSizeSpinBox_ != nullptr)
+    {
+        faceRecognitionMinFaceSizeSpinBox_->setValue(config.minFaceSizePixels);
+    }
+    if (faceRecognitionPaddingSpinBox_ != nullptr)
+    {
+        faceRecognitionPaddingSpinBox_->setValue(config.facePaddingRatio);
+    }
+    if (faceFeatureModelPathEdit_ != nullptr)
+    {
+        if (config.featureModelPath.empty())
+        {
+            faceFeatureModelPathEdit_->clear();
+        }
+        else
+        {
+            faceFeatureModelPathEdit_->setText(
+                QString::fromStdString(config.featureModelPath));
+        }
+    }
+}
+
+ivp::FaceRecognitionConfig MainWindow::collectFaceRecognitionConfig() const
+{
+    ivp::FaceRecognitionConfig config = player_.faceRecognitionConfig();
+    config.referenceDetectorSignature =
+        referenceDetectorSignature(collectDetectorConfig());
+    if (faceFeatureModelPathEdit_ != nullptr)
+    {
+        const QString modelPath = faceFeatureModelPathEdit_->text().trimmed();
+        if (!modelPath.isEmpty())
+        {
+            config.featureModelPath = modelPath.toStdString();
+        }
+    }
+    if (faceRecognitionThresholdSpinBox_ != nullptr)
+    {
+        config.similarityThreshold = static_cast<float>(
+            faceRecognitionThresholdSpinBox_->value());
+    }
+    if (faceRecognitionMarginSpinBox_ != nullptr)
+    {
+        config.minSimilarityMargin = static_cast<float>(
+            faceRecognitionMarginSpinBox_->value());
+    }
+    if (faceRecognitionMinFaceSizeSpinBox_ != nullptr)
+    {
+        config.minFaceSizePixels = faceRecognitionMinFaceSizeSpinBox_->value();
+    }
+    if (faceRecognitionPaddingSpinBox_ != nullptr)
+    {
+        config.facePaddingRatio = static_cast<float>(
+            faceRecognitionPaddingSpinBox_->value());
+    }
+    return config;
 }
 
 void MainWindow::loadDeliveryConfig(const ivp::DetectionDeliverySettings& config)
@@ -1687,22 +2355,7 @@ void MainWindow::deliverDetectionResults(
 ivp::DetectorConfig MainWindow::collectDetectorConfig() const
 {
     ivp::DetectorConfig config;
-
-    const int backendValue = detectorBackendCombo_ == nullptr
-        ? static_cast<int>(ivp::DetectorBackend::Mock)
-        : detectorBackendCombo_->currentData().toInt();
-    if (backendValue == static_cast<int>(ivp::DetectorBackend::TensorRT))
-    {
-        config.backend = ivp::DetectorBackend::TensorRT;
-    }
-    else if (backendValue == static_cast<int>(ivp::DetectorBackend::OpenCVDnn))
-    {
-        config.backend = ivp::DetectorBackend::OpenCVDnn;
-    }
-    else
-    {
-        config.backend = ivp::DetectorBackend::Mock;
-    }
+    config.backend = ivp::DetectorBackend::OpenCVDnn;
     config.confidenceThreshold = confidenceSpinBox_ == nullptr
         ? 0.5F
         : static_cast<float>(confidenceSpinBox_->value());
@@ -1713,10 +2366,10 @@ ivp::DetectorConfig MainWindow::collectDetectorConfig() const
         ? 100
         : maxDetectionsSpinBox_->value();
     config.inputWidth = inputWidthSpinBox_ == nullptr
-        ? 1088
+        ? 640
         : inputWidthSpinBox_->value();
     config.inputHeight = inputHeightSpinBox_ == nullptr
-        ? 1088
+        ? 640
         : inputHeightSpinBox_->value();
     config.classCount = classCountSpinBox_ == nullptr
         ? 0
@@ -1724,15 +2377,9 @@ ivp::DetectorConfig MainWindow::collectDetectorConfig() const
     config.detectEveryNFrames = detectEverySpinBox_ == nullptr
         ? 1
         : detectEverySpinBox_->value();
-    config.simulatedDelayMs = mockDelaySpinBox_ == nullptr
-        ? 8
-        : mockDelaySpinBox_->value();
     config.onnxPath = onnxPathEdit_ == nullptr
         ? std::string()
         : onnxPathEdit_->text().trimmed().toStdString();
-    config.enginePath = enginePathEdit_ == nullptr
-        ? std::string()
-        : enginePathEdit_->text().trimmed().toStdString();
     config.labelsPath = labelsPathEdit_ == nullptr
         ? std::string()
         : labelsPathEdit_->text().trimmed().toStdString();
@@ -1757,17 +2404,6 @@ void MainWindow::browseOnnxPath()
     if (!path.isEmpty() && onnxPathEdit_ != nullptr)
     {
         onnxPathEdit_->setText(path);
-    }
-}
-
-void MainWindow::browseEnginePath()
-{
-    const QString path = chooseModelFile(
-        tr("Select TensorRT Engine"),
-        tr("TensorRT Engine (*.engine *.plan *.trt);;All Files (*.*)"));
-    if (!path.isEmpty() && enginePathEdit_ != nullptr)
-    {
-        enginePathEdit_->setText(path);
     }
 }
 
@@ -1798,22 +2434,39 @@ void MainWindow::applyDetectorSettings()
         return;
     }
 
+    if (!applyCurrentFaceRecognitionConfig())
+    {
+        return;
+    }
+
     saveViewerSettings();
     resetDetectionSummary();
     videoWidget_->setDetections(ivp::DetectionResults());
+    // Reference templates are cropped from detector boxes. Re-check the
+    // gallery after replacing the detector so stale templates can be rebuilt
+    // before the next recognition pass.
+    reloadFaceRecognitionGallery();
+    updateFaceRecognitionDiagnostics();
     statusValueLabel_->setText(player_.isOpened()
         ? tr("Parameters Applied")
         : tr("Parameters Ready"));
 }
 
+void MainWindow::applyFaceRecognitionSettings()
+{
+    if (!applyCurrentFaceRecognitionConfig())
+    {
+        return;
+    }
+
+    saveViewerSettings();
+    statusValueLabel_->setText(player_.isOpened()
+        ? tr("Recognition Applied")
+        : tr("Recognition Ready"));
+}
+
 void MainWindow::applyFaceDetectorPreset()
 {
-    if (detectorBackendCombo_ != nullptr)
-    {
-        const int index = detectorBackendCombo_->findData(
-            static_cast<int>(ivp::DetectorBackend::OpenCVDnn));
-        detectorBackendCombo_->setCurrentIndex(index >= 0 ? index : 0);
-    }
     if (confidenceSpinBox_ != nullptr)
     {
         confidenceSpinBox_->setValue(0.25);
@@ -1877,64 +2530,717 @@ void MainWindow::browseExportDirectory()
     }
 }
 
+void MainWindow::browseFaceImagePath()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        tr("Select Face Image"),
+        QDir::currentPath(),
+        tr("Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*.*)"));
+    if (!path.isEmpty() && faceImagePathEdit_ != nullptr)
+    {
+        faceImagePathEdit_->setText(path);
+    }
+}
+
+void MainWindow::refreshFaceLibrary()
+{
+    if (faceLibraryModel_ == nullptr || faceLibraryStatusLabel_ == nullptr)
+    {
+        return;
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        faceLibraryModel_->clear();
+        faceLibraryStatusLabel_->setText(tr("Storage not ready"));
+        reloadFaceIdentities();
+        return;
+    }
+
+    ivp::FaceIdentityEntries entries = detectionStorage_.recentFaceIdentities(200);
+    const std::string error = detectionStorage_.lastError();
+    if (!error.empty())
+    {
+        faceLibraryModel_->clear();
+        faceLibraryStatusLabel_->setText(tr("Query error"));
+        qWarning() << "Could not query face identities:" << QString::fromStdString(error);
+        reloadFaceIdentities();
+        return;
+    }
+
+    const int count = static_cast<int>(entries.size());
+    faceLibraryModel_->setRows(std::move(entries));
+    faceLibraryStatusLabel_->setText(QStringLiteral("%1 faces").arg(count));
+    if (faceLibraryTableView_ != nullptr)
+    {
+        faceLibraryTableView_->resizeColumnsToContents();
+        faceLibraryTableView_->horizontalHeader()->setStretchLastSection(true);
+    }
+
+    reloadFaceRecognitionGallery();
+    reloadFaceIdentities();
+}
+
+void MainWindow::reloadFaceRecognitionGallery()
+{
+    const auto updateLibraryStatus = [this]() {
+        if (faceLibraryStatusLabel_ != nullptr)
+        {
+            faceLibraryStatusLabel_->setText(
+                tr("%1 faces / %2 templates")
+                    .arg(faceLibraryModel_ == nullptr
+                             ? 0
+                             : faceLibraryModel_->rowCount())
+                    .arg(static_cast<qulonglong>(
+                        player_.faceRecognitionGallerySize())));
+        }
+    };
+
+    if (!detectionStorage_.isOpen())
+    {
+        player_.setFaceRecognitionGallery({});
+        if (faceLibraryStatusLabel_ != nullptr)
+        {
+            faceLibraryStatusLabel_->setText(tr("Storage not ready"));
+        }
+        updateFaceRecognitionDiagnostics();
+        return;
+    }
+
+    const ivp::FaceFeatureTemplates templates =
+        detectionStorage_.allFaceFeatures();
+    const std::string storageError = detectionStorage_.lastError();
+    if (!storageError.empty())
+    {
+        qWarning() << "Could not load face feature gallery:"
+                   << QString::fromStdString(storageError);
+        updateFaceRecognitionDiagnostics();
+        return;
+    }
+
+    const ivp::FaceIdentityEntries faces = detectionStorage_.recentFaceIdentities(200);
+    const bool galleryApplied = player_.setFaceRecognitionGallery(templates);
+    const ivp::FaceRecognitionDiagnostics diagnostics =
+        player_.faceRecognitionDiagnostics();
+    const bool shouldRebuild = diagnostics.galleryNeedsRebuild
+        || (diagnostics.gallerySize == 0 && !faces.empty());
+
+    if (shouldRebuild)
+    {
+        if (rebuildFaceRecognitionGalleryFromReferences())
+        {
+            const ivp::FaceFeatureTemplates rebuiltTemplates =
+                detectionStorage_.allFaceFeatures();
+            if (detectionStorage_.lastError().empty()
+                && player_.setFaceRecognitionGallery(rebuiltTemplates))
+            {
+                const ivp::FaceRecognitionDiagnostics rebuiltDiagnostics =
+                    player_.faceRecognitionDiagnostics();
+                if (!rebuiltDiagnostics.galleryNeedsRebuild
+                    && (rebuiltDiagnostics.gallerySize > 0 || faces.empty()))
+                {
+                    qWarning() << "Rebuilt face feature gallery from reference images."
+                               << "Fingerprint:"
+                               << QString::fromStdString(
+                                      rebuiltDiagnostics.featureFingerprint);
+                }
+                else
+                {
+                    qWarning() << "Reference features were rebuilt, but the gallery is still incompatible."
+                               << QString::fromStdString(
+                                      player_.faceRecognitionLastError());
+                }
+                updateLibraryStatus();
+                updateFaceRecognitionDiagnostics();
+                return;
+            }
+        }
+
+        qWarning() << "Face feature gallery needs rebuilding, but no usable templates could be loaded."
+                   << QString::fromStdString(player_.faceRecognitionLastError());
+        updateLibraryStatus();
+        updateFaceRecognitionDiagnostics();
+        return;
+    }
+
+    if (!galleryApplied)
+    {
+        qWarning() << "Could not apply face feature gallery:"
+                   << QString::fromStdString(player_.faceRecognitionLastError());
+        updateLibraryStatus();
+        updateFaceRecognitionDiagnostics();
+        return;
+    }
+
+    updateLibraryStatus();
+    updateFaceRecognitionDiagnostics();
+}
+
+bool MainWindow::rebuildFaceRecognitionGalleryFromReferences()
+{
+    if (!detectionStorage_.isOpen())
+    {
+        return false;
+    }
+
+    const ivp::FaceIdentityEntries faces = detectionStorage_.recentFaceIdentities(200);
+    if (faces.empty())
+    {
+        return false;
+    }
+
+    if (!faceReferenceRecognizer_.initialize(player_.faceRecognitionConfig()))
+    {
+        qWarning() << "Could not initialize face reference recognizer:"
+                   << QString::fromStdString(faceReferenceRecognizer_.lastError());
+        return false;
+    }
+    ivp::DetectorConfig referenceDetectorConfig = collectDetectorConfig();
+    referenceDetectorConfig.detectEveryNFrames = 1;
+    ivp::YoloOpenCVDnnDetector referenceDetector;
+    if (!referenceDetector.initialize(referenceDetectorConfig))
+    {
+        qWarning() << "Could not initialize face reference detector:"
+                   << QString::fromStdString(referenceDetector.lastError());
+        return false;
+    }
+
+    bool anySaved = false;
+    for (const ivp::FaceIdentityEntry& face : faces)
+    {
+        if (face.referenceImagePath.empty())
+        {
+            continue;
+        }
+
+        ivp::FaceReferenceImage reference;
+        reference.faceId = face.faceId;
+        reference.faceCode = face.faceCode;
+        reference.faceName = face.displayName;
+        reference.imagePath = projectResourcePath(
+            QString::fromStdString(face.referenceImagePath)).toStdString();
+
+        ivp::FaceFeatureTemplates templates =
+            faceReferenceRecognizer_.extractReferenceFeatures(
+                reference,
+                &referenceDetector);
+        if (templates.empty())
+        {
+            const std::string error = faceReferenceRecognizer_.lastError();
+            if (!error.empty())
+            {
+                qWarning() << "Could not rebuild face features for"
+                           << QString::fromStdString(face.faceCode) << ":"
+                           << QString::fromStdString(error);
+            }
+            continue;
+        }
+
+        if (!detectionStorage_.replaceFaceFeatures(face.faceId, templates))
+        {
+            qWarning() << "Could not store rebuilt face features for"
+                       << QString::fromStdString(face.faceCode) << ":"
+                       << QString::fromStdString(detectionStorage_.lastError());
+            continue;
+        }
+
+        anySaved = true;
+    }
+
+    return anySaved;
+}
+
+void MainWindow::updateFaceRecognitionDiagnostics()
+{
+    if (faceRecognitionStatusLabel_ == nullptr
+        && faceFeatureModelPathEdit_ == nullptr
+        && faceFeatureModelStatusLabel_ == nullptr)
+    {
+        return;
+    }
+
+    const ivp::FaceRecognitionDiagnostics diagnostics =
+        player_.faceRecognitionDiagnostics();
+    const ivp::FaceRecognitionConfig config = player_.faceRecognitionConfig();
+    const bool hasPendingChanges =
+        !sameFaceRecognitionConfig(collectFaceRecognitionConfig(), config);
+    const QString modelName = QString::fromStdString(diagnostics.modelName);
+    const QString modelPath = QString::fromStdString(diagnostics.modelPath);
+    const QString error = QString::fromStdString(diagnostics.lastError);
+
+    if (faceFeatureModelPathEdit_ != nullptr)
+    {
+        faceFeatureModelPathEdit_->setText(
+            modelPath.isEmpty() ? tr("Unknown") : modelPath);
+        faceFeatureModelPathEdit_->setToolTip(
+            tr("This model extracts face features for identity matching.\n%1")
+                .arg(modelPath.isEmpty() ? tr("Path unavailable") : modelPath));
+    }
+
+    QString status;
+    if (!diagnostics.enabled)
+    {
+        status = tr("Disabled");
+    }
+    else if (!diagnostics.available)
+    {
+        QString detail = error;
+        if (detail.size() > 72)
+        {
+            detail = detail.left(69) + QStringLiteral("...");
+        }
+        status = error.isEmpty()
+            ? tr("Unavailable")
+            : tr("Unavailable | %1").arg(detail);
+    }
+    else
+    {
+        status = tr("Ready | %1 | %2 templates")
+            .arg(modelName.isEmpty() ? tr("Unknown model") : modelName)
+            .arg(static_cast<qulonglong>(diagnostics.gallerySize));
+        if (diagnostics.galleryNeedsRebuild)
+        {
+            status = tr("Rebuild required | %1")
+                .arg(status);
+        }
+        if (!error.isEmpty())
+        {
+            QString detail = error;
+            if (detail.size() > 72)
+            {
+                detail = detail.left(69) + QStringLiteral("...");
+            }
+            status += tr(" | %1").arg(detail);
+        }
+    }
+    if (hasPendingChanges)
+    {
+        status = tr("Pending Apply | %1").arg(status);
+    }
+
+    if (faceRecognitionStatusLabel_ != nullptr)
+    {
+        faceRecognitionStatusLabel_->setText(status);
+        faceRecognitionStatusLabel_->setToolTip(
+            tr("Model: %1\nPath: %2\nTemplates: %3\nCurrent fingerprint: %4\nGallery fingerprint: %5\nCompatible: %6\nThreshold: %7\nMargin: %8\nMin face: %9 px\nPadding: %10\nPending changes: %11\n%12")
+                .arg(modelName.isEmpty() ? tr("Unknown") : modelName)
+                .arg(modelPath.isEmpty() ? tr("Unknown") : modelPath)
+                .arg(static_cast<qulonglong>(diagnostics.gallerySize))
+                .arg(QString::fromStdString(diagnostics.featureFingerprint))
+                .arg(diagnostics.galleryFingerprint.empty()
+                         ? tr("None")
+                         : QString::fromStdString(diagnostics.galleryFingerprint))
+                .arg(diagnostics.galleryCompatible ? tr("Yes") : tr("No"))
+                .arg(config.similarityThreshold, 0, 'f', 3)
+                .arg(config.minSimilarityMargin, 0, 'f', 3)
+                .arg(config.minFaceSizePixels)
+                .arg(config.facePaddingRatio, 0, 'f', 2)
+                .arg(hasPendingChanges ? tr("Yes") : tr("No"))
+                .arg(error));
+    }
+    if (faceFeatureModelStatusLabel_ != nullptr)
+    {
+        faceFeatureModelStatusLabel_->setText(status);
+        faceFeatureModelStatusLabel_->setToolTip(
+            tr("Model: %1\nPath: %2\nTemplates: %3\nCurrent fingerprint: %4\nGallery fingerprint: %5\nCompatible: %6\nThreshold: %7\nMargin: %8\nMin face: %9 px\nPadding: %10\nPending changes: %11\n%12")
+                .arg(modelName.isEmpty() ? tr("Unknown") : modelName)
+                .arg(modelPath.isEmpty() ? tr("Unknown") : modelPath)
+                .arg(static_cast<qulonglong>(diagnostics.gallerySize))
+                .arg(QString::fromStdString(diagnostics.featureFingerprint))
+                .arg(diagnostics.galleryFingerprint.empty()
+                         ? tr("None")
+                         : QString::fromStdString(diagnostics.galleryFingerprint))
+                .arg(diagnostics.galleryCompatible ? tr("Yes") : tr("No"))
+                .arg(config.similarityThreshold, 0, 'f', 3)
+                .arg(config.minSimilarityMargin, 0, 'f', 3)
+                .arg(config.minFaceSizePixels)
+                .arg(config.facePaddingRatio, 0, 'f', 2)
+                .arg(hasPendingChanges ? tr("Yes") : tr("No"))
+                .arg(error));
+    }
+}
+
+void MainWindow::reloadFaceIdentities()
+{
+    if (historyFaceCombo_ == nullptr)
+    {
+        return;
+    }
+
+    const qlonglong selectedFaceId = historyFaceCombo_->currentData().toLongLong();
+    const QSignalBlocker blocker(historyFaceCombo_);
+    historyFaceCombo_->clear();
+    historyFaceCombo_->addItem(tr("Unassigned"), QVariant::fromValue<qlonglong>(0));
+
+    if (!detectionStorage_.isOpen())
+    {
+        if (historyFaceBindButton_ != nullptr)
+        {
+            historyFaceBindButton_->setEnabled(false);
+        }
+        if (historyFaceClearButton_ != nullptr)
+        {
+            historyFaceClearButton_->setEnabled(false);
+        }
+        return;
+    }
+
+    const ivp::FaceIdentityEntries faces = detectionStorage_.recentFaceIdentities(200);
+    for (const ivp::FaceIdentityEntry& face : faces)
+    {
+        const QString label = face.displayName.empty()
+            ? QString::fromStdString(face.faceCode)
+            : QStringLiteral("%1 [%2]")
+                  .arg(QString::fromStdString(face.displayName))
+                  .arg(QString::fromStdString(face.faceCode));
+        historyFaceCombo_->addItem(
+            label,
+            QVariant::fromValue<qlonglong>(static_cast<qlonglong>(face.faceId)));
+    }
+
+    if (historyFaceCombo_->count() > 1)
+    {
+        int selectedIndex = 0;
+        for (int i = 1; i < historyFaceCombo_->count(); ++i)
+        {
+            if (historyFaceCombo_->itemData(i).toLongLong() == selectedFaceId)
+            {
+                selectedIndex = i;
+                break;
+            }
+        }
+        historyFaceCombo_->setCurrentIndex(selectedIndex);
+    }
+
+    if (historyFaceBindButton_ != nullptr)
+    {
+        historyFaceBindButton_->setEnabled(historyFaceCombo_->count() > 1);
+    }
+    if (historyFaceClearButton_ != nullptr)
+    {
+        historyFaceClearButton_->setEnabled(historyFaceCombo_->count() > 1);
+    }
+}
+
+void MainWindow::addFaceIdentity()
+{
+    if (!detectionStorage_.isOpen())
+    {
+        initializeStorage();
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        return;
+    }
+
+    const QString code = faceCodeEdit_ == nullptr ? QString() : faceCodeEdit_->text().trimmed();
+    const QString name = faceNameEdit_ == nullptr ? QString() : faceNameEdit_->text().trimmed();
+    if (code.isEmpty() || name.isEmpty())
+    {
+        QMessageBox::warning(this, tr("Face Library"), tr("Code and name are required."));
+        return;
+    }
+
+    QString storedRelativeReferencePath;
+    QString storedAbsoluteReferencePath;
+    if (faceImagePathEdit_ != nullptr)
+    {
+        const QString selectedReferencePath = faceImagePathEdit_->text().trimmed();
+        if (!selectedReferencePath.isEmpty())
+        {
+            storedAbsoluteReferencePath = storeFaceReferenceImage(
+                selectedReferencePath,
+                code,
+                &storedRelativeReferencePath);
+            if (storedAbsoluteReferencePath.isEmpty())
+            {
+                QMessageBox::warning(
+                    this,
+                    tr("Face Library"),
+                    tr("Could not store reference image in the project: %1")
+                        .arg(selectedReferencePath));
+                return;
+            }
+        }
+    }
+
+    ivp::FaceIdentityEntry entry;
+    entry.faceCode = code.toStdString();
+    entry.displayName = name.toStdString();
+    entry.referenceImagePath = storedRelativeReferencePath.isEmpty()
+        ? std::string()
+        : storedRelativeReferencePath.toStdString();
+    entry.notes = faceNotesEdit_ == nullptr
+        ? std::string()
+        : faceNotesEdit_->text().trimmed().toStdString();
+
+    if (!detectionStorage_.saveFaceIdentity(entry))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Face Library"),
+            tr("Could not save face identity: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    const std::optional<ivp::FaceIdentityEntry> savedIdentity =
+        detectionStorage_.faceIdentityByCode(entry.faceCode);
+    if (!savedIdentity.has_value())
+    {
+        QMessageBox::warning(
+            this,
+            tr("Face Library"),
+            tr("The identity was saved, but its database id could not be read."));
+        return;
+    }
+
+    ivp::FaceReferenceImage reference;
+    reference.faceId = savedIdentity->faceId;
+    reference.faceCode = savedIdentity->faceCode;
+    reference.faceName = savedIdentity->displayName;
+    reference.imagePath = storedAbsoluteReferencePath.isEmpty()
+        ? savedIdentity->referenceImagePath
+        : storedAbsoluteReferencePath.toStdString();
+
+    faceReferenceRecognizer_.initialize(player_.faceRecognitionConfig());
+    ivp::FaceFeatureTemplates templates;
+    if (!reference.imagePath.empty())
+    {
+        ivp::DetectorConfig referenceDetectorConfig = collectDetectorConfig();
+        referenceDetectorConfig.detectEveryNFrames = 1;
+        ivp::YoloOpenCVDnnDetector referenceDetector;
+        if (!referenceDetector.initialize(referenceDetectorConfig))
+        {
+            QMessageBox::warning(
+                this,
+                tr("Face Library"),
+                tr("Identity saved, but reference face detection is unavailable: %1")
+                    .arg(QString::fromStdString(
+                        referenceDetector.lastError())));
+        }
+        else
+        {
+            templates =
+                faceReferenceRecognizer_.extractReferenceFeatures(
+                    reference,
+                    &referenceDetector);
+            if (templates.empty()
+                && !faceReferenceRecognizer_.lastError().empty())
+            {
+                QMessageBox::warning(
+                    this,
+                    tr("Face Library"),
+                tr("Identity saved, but no usable face feature was extracted: %1")
+                        .arg(QString::fromStdString(
+                            faceReferenceRecognizer_.lastError())));
+            }
+        }
+    }
+
+    if (!templates.empty()
+        && !detectionStorage_.replaceFaceFeatures(savedIdentity->faceId, templates))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Face Library"),
+            tr("Could not save face features: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    if (faceCodeEdit_ != nullptr)
+    {
+        faceCodeEdit_->clear();
+    }
+    if (faceNameEdit_ != nullptr)
+    {
+        faceNameEdit_->clear();
+    }
+    if (faceImagePathEdit_ != nullptr)
+    {
+        faceImagePathEdit_->clear();
+    }
+    if (faceNotesEdit_ != nullptr)
+    {
+        faceNotesEdit_->clear();
+    }
+
+    refreshFaceLibrary();
+    updateFaceRecognitionDiagnostics();
+}
+
+void MainWindow::removeSelectedFaceIdentity()
+{
+    if (faceLibraryTableView_ == nullptr || faceLibraryModel_ == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndexList selectedRows =
+        faceLibraryTableView_->selectionModel() == nullptr
+            ? QModelIndexList()
+            : faceLibraryTableView_->selectionModel()->selectedRows();
+    if (selectedRows.isEmpty())
+    {
+        QMessageBox::information(this, tr("Face Library"), tr("Select a face first."));
+        return;
+    }
+
+    const ivp::FaceIdentityEntry* entry = faceLibraryModel_->rowAt(selectedRows.first().row());
+    if (entry == nullptr)
+    {
+        return;
+    }
+
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        tr("Face Library"),
+        tr("Remove this face identity and clear linked history associations?"),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    if (!detectionStorage_.removeFaceIdentity(entry->faceId))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Face Library"),
+            tr("Could not remove face identity: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    reloadFaceRecognitionGallery();
+    refreshFaceLibrary();
+    refreshHistory();
+}
+
+void MainWindow::bindSelectedHistoryFace()
+{
+    if (historyTableView_ == nullptr || historyModel_ == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndexList selectedRows =
+        historyTableView_->selectionModel() == nullptr
+            ? QModelIndexList()
+            : historyTableView_->selectionModel()->selectedRows();
+    if (selectedRows.isEmpty())
+    {
+        QMessageBox::information(this, tr("Association"), tr("Select a history record first."));
+        return;
+    }
+
+    const ivp::DetectionHistoryRow* record = historyModel_->rowAt(selectedRows.first().row());
+    if (record == nullptr || record->recordId <= 0)
+    {
+        return;
+    }
+
+    const qlonglong faceId = historyFaceCombo_ == nullptr
+        ? 0
+        : historyFaceCombo_->currentData().toLongLong();
+    if (faceId <= 0)
+    {
+        QMessageBox::information(this, tr("Association"), tr("Select a face first."));
+        return;
+    }
+
+    if (!detectionStorage_.bindFaceIdentity(
+            record->recordId,
+            static_cast<std::int64_t>(faceId)))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Association"),
+            tr("Could not bind face identity: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    refreshHistory();
+}
+
+void MainWindow::clearSelectedHistoryFace()
+{
+    if (historyTableView_ == nullptr || historyModel_ == nullptr)
+    {
+        return;
+    }
+
+    const QModelIndexList selectedRows =
+        historyTableView_->selectionModel() == nullptr
+            ? QModelIndexList()
+            : historyTableView_->selectionModel()->selectedRows();
+    if (selectedRows.isEmpty())
+    {
+        QMessageBox::information(this, tr("Association"), tr("Select a history record first."));
+        return;
+    }
+
+    const ivp::DetectionHistoryRow* record = historyModel_->rowAt(selectedRows.first().row());
+    if (record == nullptr || record->recordId <= 0)
+    {
+        return;
+    }
+
+    if (!detectionStorage_.clearFaceIdentity(record->recordId))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Association"),
+            tr("Could not clear face identity: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    refreshHistory();
+}
+
 void MainWindow::updateDetectorParameterState()
 {
-    const int backend = detectorBackendCombo_ == nullptr
-        ? static_cast<int>(ivp::DetectorBackend::Mock)
-        : detectorBackendCombo_->currentData().toInt();
-    const bool useTensorRT =
-        backend == static_cast<int>(ivp::DetectorBackend::TensorRT);
-    const bool useOpenCVDnn =
-        backend == static_cast<int>(ivp::DetectorBackend::OpenCVDnn);
-    const bool useRealYolo = useTensorRT || useOpenCVDnn;
-
     if (nmsSpinBox_ != nullptr)
     {
-        nmsSpinBox_->setEnabled(useRealYolo);
+        nmsSpinBox_->setEnabled(true);
     }
     if (maxDetectionsSpinBox_ != nullptr)
     {
-        maxDetectionsSpinBox_->setEnabled(useRealYolo);
+        maxDetectionsSpinBox_->setEnabled(true);
     }
     if (inputWidthSpinBox_ != nullptr)
     {
-        inputWidthSpinBox_->setEnabled(useRealYolo);
+        inputWidthSpinBox_->setEnabled(true);
     }
     if (inputHeightSpinBox_ != nullptr)
     {
-        inputHeightSpinBox_->setEnabled(useRealYolo);
+        inputHeightSpinBox_->setEnabled(true);
     }
     if (classCountSpinBox_ != nullptr)
     {
-        classCountSpinBox_->setEnabled(useRealYolo);
+        classCountSpinBox_->setEnabled(true);
     }
     if (onnxPathEdit_ != nullptr)
     {
-        onnxPathEdit_->setEnabled(useOpenCVDnn || useTensorRT);
-    }
-    if (enginePathEdit_ != nullptr)
-    {
-        enginePathEdit_->setEnabled(useTensorRT);
+        onnxPathEdit_->setEnabled(true);
     }
     if (labelsPathEdit_ != nullptr)
     {
-        labelsPathEdit_->setEnabled(useRealYolo);
+        labelsPathEdit_->setEnabled(true);
     }
     if (onnxBrowseButton_ != nullptr)
     {
-        onnxBrowseButton_->setEnabled(useOpenCVDnn || useTensorRT);
-    }
-    if (engineBrowseButton_ != nullptr)
-    {
-        engineBrowseButton_->setEnabled(useTensorRT);
+        onnxBrowseButton_->setEnabled(true);
     }
     if (labelsBrowseButton_ != nullptr)
     {
-        labelsBrowseButton_->setEnabled(useRealYolo);
-    }
-    if (mockDelaySpinBox_ != nullptr)
-    {
-        mockDelaySpinBox_->setEnabled(!useRealYolo);
+        labelsBrowseButton_->setEnabled(true);
     }
 }
 
@@ -1997,6 +3303,7 @@ void MainWindow::initializeStorage()
     }
 
     storageValueLabel_->setText(tr("Ready"));
+    refreshFaceLibrary();
     reloadHistorySessions();
     refreshHistory();
 }
@@ -2272,14 +3579,18 @@ void MainWindow::syncControlStatus(bool publish)
     status.videoHeight = controlVideoHeight_;
     status.videoFps = controlVideoFps_;
     status.durationMs = controlDurationMs_;
-    status.audioAvailable = controlAudioAvailable_;
-    status.audioSampleRate = controlAudioSampleRate_;
-    status.audioChannels = controlAudioChannels_;
-    status.message = status.opened
-        ? (isDetectionPreviewMode()
-              ? tr("Detection Preview")
-              : (status.playing ? tr("Playing") : tr("Paused")))
-        : tr("No input");
+    status.runtime = player_.runtimeStatus();
+    if (!status.opened)
+    {
+        status.message = tr("No input");
+    }
+    else
+    {
+        const QString runtimeName = QString::fromUtf8(ivp::runtimeStateName(status.runtime.state));
+        status.message = isDetectionPreviewMode()
+            ? tr("Detection Preview | %1").arg(runtimeName)
+            : runtimeName;
+    }
 
     controlServer_.setStatusSnapshot(status);
     if (controlStatusLabel_ != nullptr)
@@ -2307,6 +3618,29 @@ QString MainWindow::formatControlStatus(const ivp::DetectionControlStatus& statu
         .arg(status.listenAddress)
         .arg(status.listenPort)
         .arg(status.connectedClients);
+}
+
+QString MainWindow::formatRuntimeSummary(const ivp::RuntimeStatus& status) const
+{
+    const ivp::RuntimeMetrics& metrics = status.metrics;
+    const QString frameText = metrics.currentFrameIndex >= 0
+        ? QString::number(metrics.currentFrameIndex)
+        : QStringLiteral("--");
+    const QString ptsText = metrics.currentPtsMs >= 0
+        ? QString::number(metrics.currentPtsMs)
+        : QStringLiteral("--");
+    return QStringLiteral("%1 | F %2 @ %3 ms | D %4 / V %5 / I %6 fps | Q %7/%8 | Drop %9/%10 | Infer %11 ms")
+        .arg(QString::fromUtf8(ivp::runtimeStateName(status.state)))
+        .arg(frameText)
+        .arg(ptsText)
+        .arg(metrics.decodeFps, 0, 'f', 1)
+        .arg(metrics.displayFps, 0, 'f', 1)
+        .arg(metrics.inferenceFps, 0, 'f', 1)
+        .arg(static_cast<qulonglong>(metrics.displayQueueSize))
+        .arg(static_cast<qulonglong>(metrics.inferenceQueueSize))
+        .arg(static_cast<qlonglong>(metrics.droppedDisplayFrames))
+        .arg(static_cast<qlonglong>(metrics.droppedInferenceFrames))
+        .arg(static_cast<qlonglong>(metrics.lastInferenceLatencyMs));
 }
 
 QString MainWindow::formatDuration(qint64 milliseconds) const

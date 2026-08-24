@@ -131,10 +131,51 @@ bool YoloOpenCVDnnDetector::initialize(const DetectorConfig& config)
         }
         impl_->net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
         impl_->net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+
+        // Validate the configured input shape during initialization so an
+        // incompatible ONNX reshape fails before the inference thread starts.
+        const cv::MatShape inputShape{
+            1,
+            3,
+            config_.inputHeight,
+            config_.inputWidth};
+        std::vector<int> layerIds;
+        std::vector<std::vector<cv::MatShape>> inputShapes;
+        std::vector<std::vector<cv::MatShape>> outputShapes;
+        impl_->net.getLayersShapes(
+            inputShape,
+            CV_32F,
+            layerIds,
+            inputShapes,
+            outputShapes);
+
+        // OpenCV can defer ONNX reshape validation until forward(). Probe the
+        // network during initialization so bad model/input combinations fail
+        // before the inference thread starts.
+        std::vector<float> probeValues(
+            static_cast<std::size_t>(config_.inputWidth)
+                * static_cast<std::size_t>(config_.inputHeight)
+                * 3U,
+            0.0F);
+        cv::Mat probeBlob(
+            4,
+            inputShape.data(),
+            CV_32F,
+            probeValues.data());
+        impl_->net.setInput(probeBlob);
+        std::vector<cv::Mat> probeOutputs;
+        impl_->net.forward(
+            probeOutputs,
+            impl_->net.getUnconnectedOutLayersNames());
+        if (probeOutputs.empty())
+        {
+            lastError_ = "OpenCV DNN model returned no output during validation.";
+            return false;
+        }
     }
     catch (const cv::Exception& exception)
     {
-        lastError_ = "OpenCV DNN could not load ONNX model: "
+        lastError_ = "OpenCV DNN model/input shape is incompatible: "
             + std::string(exception.what());
         return false;
     }

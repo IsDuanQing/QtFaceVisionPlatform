@@ -1,7 +1,9 @@
 #ifndef IVP_PIPELINE_FRAMEDISPATCHER_H
 #define IVP_PIPELINE_FRAMEDISPATCHER_H
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 #include "common/BlockingQueue.h"
@@ -43,15 +45,20 @@ public:
 
     std::size_t displayQueueSize() const;
     std::size_t inferenceQueueSize() const;
+    std::int64_t droppedDisplayFrames() const;
+    std::int64_t droppedInferenceFrames() const;
 
 private:
     static bool pushFrame(
         BlockingQueue<VideoFramePtr>* queue,
         VideoFramePtr frame,
-        FrameQueuePolicy policy);
+        FrameQueuePolicy policy,
+        std::atomic<std::int64_t>* droppedFrames);
 
     BlockingQueue<VideoFramePtr> displayQueue_;
     BlockingQueue<VideoFramePtr> inferenceQueue_;
+    std::atomic<std::int64_t> droppedDisplayFrames_;
+    std::atomic<std::int64_t> droppedInferenceFrames_;
 };
 
 } // namespace ivp

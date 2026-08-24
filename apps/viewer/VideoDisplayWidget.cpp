@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <string>
 
 #include <QColor>
 #include <QFontMetrics>
@@ -34,6 +35,11 @@ QColor detectionColor()
     return QColor(80, 220, 160);
 }
 
+QColor recognizedDetectionColor()
+{
+    return QColor(103, 205, 255);
+}
+
 QColor detectionTextBackgroundColor()
 {
     return QColor(25, 43, 36, 170);
@@ -42,6 +48,51 @@ QColor detectionTextBackgroundColor()
 QColor detectionTextColor()
 {
     return QColor(247, 250, 248);
+}
+
+QString recognitionDecisionLabel(const std::string& decision)
+{
+    if (decision == "low_similarity")
+    {
+        return QStringLiteral("low");
+    }
+    if (decision == "ambiguous")
+    {
+        return QStringLiteral("ambiguous");
+    }
+    if (decision == "no_templates")
+    {
+        return QStringLiteral("no refs");
+    }
+    if (decision == "unavailable")
+    {
+        return QStringLiteral("unavailable");
+    }
+    if (decision == "no_query_feature")
+    {
+        return QStringLiteral("no feature");
+    }
+    if (decision == "no_candidates")
+    {
+        return QStringLiteral("no match");
+    }
+    if (decision == "face_too_small")
+    {
+        return QStringLiteral("too small");
+    }
+    if (decision == "not_face_detection")
+    {
+        return QStringLiteral("not face");
+    }
+    if (decision == "empty_frame")
+    {
+        return QStringLiteral("no frame");
+    }
+    if (decision == "disabled")
+    {
+        return QStringLiteral("disabled");
+    }
+    return {};
 }
 
 } // namespace
@@ -264,11 +315,6 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
         return;
     }
 
-    QPen boxPen(detectionColor());
-    boxPen.setWidthF(2.0);
-    painter.setPen(boxPen);
-    painter.setBrush(Qt::NoBrush);
-
     const QFontMetrics metrics(painter.font());
 
     for (const ivp::DetectionResult& result : visibleDetections_)
@@ -279,6 +325,9 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
             continue;
         }
 
+        const bool recognized = result.face.matched;
+        QPen boxPen(recognized ? recognizedDetectionColor() : detectionColor());
+        boxPen.setWidthF(recognized ? 2.4 : 2.0);
         painter.setPen(boxPen);
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(boxRect);
@@ -286,9 +335,46 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
         const QString className = result.className.empty()
             ? QStringLiteral("class_%1").arg(result.classId)
             : QString::fromStdString(result.className);
-        const QString labelText = QStringLiteral("%1 %2%")
-                                     .arg(className)
-                                     .arg(static_cast<int>(std::round(result.confidence * 100.0F)));
+        const int similarityPercent = static_cast<int>(
+            std::round(result.face.similarity * 100.0F));
+        const int thresholdPercent = static_cast<int>(
+            std::round(result.face.threshold * 100.0F));
+        QString labelText;
+        if (recognized)
+        {
+            labelText = QStringLiteral("%1  match %2%")
+                .arg(result.face.faceName.empty()
+                         ? QString::fromStdString(result.face.faceCode)
+                         : QString::fromStdString(result.face.faceName))
+                .arg(similarityPercent);
+        }
+        else
+        {
+            const QString decisionLabel =
+                recognitionDecisionLabel(result.face.decision);
+            if (decisionLabel.isEmpty())
+            {
+                labelText = QStringLiteral("%1  det %2%")
+                    .arg(className)
+                    .arg(static_cast<int>(
+                        std::round(result.confidence * 100.0F)));
+            }
+            else if (result.face.decision == "low_similarity"
+                     || result.face.decision == "ambiguous")
+            {
+                labelText = QStringLiteral("%1  %2 %3%/%4%")
+                    .arg(className)
+                    .arg(decisionLabel)
+                    .arg(similarityPercent)
+                    .arg(thresholdPercent);
+            }
+            else
+            {
+                labelText = QStringLiteral("%1  %2")
+                    .arg(className)
+                    .arg(decisionLabel);
+            }
+        }
         const QRect labelBounds = metrics.boundingRect(labelText);
         const QSize labelSize = labelBounds.size() + QSize(14, 8);
 

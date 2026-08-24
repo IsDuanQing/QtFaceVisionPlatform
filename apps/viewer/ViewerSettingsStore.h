@@ -4,6 +4,7 @@
 #include <QString>
 
 #include "inference/IDetector.h"
+#include "common/FaceFeature.h"
 #include "network/DetectionDeliverySettings.h"
 
 namespace ivp::viewer
@@ -12,7 +13,7 @@ namespace ivp::viewer
 struct ViewerSettings
 {
     ivp::DetectorConfig detectorConfig;
-    double imageSequenceFps = 10.0;
+    ivp::FaceRecognitionConfig faceRecognitionConfig;
     ivp::DetectionDeliverySettings delivery;
 };
 

@@ -8,6 +8,8 @@
 
 #include <QString>
 
+#include "common/RuntimeStatus.h"
+
 namespace ivp
 {
 
@@ -39,9 +41,7 @@ struct DetectionControlStatus
     int videoHeight = 0;
     double videoFps = 0.0;
     qint64 durationMs = 0;
-    bool audioAvailable = false;
-    int audioSampleRate = 0;
-    int audioChannels = 0;
+    RuntimeStatus runtime;
     QString message;
 };
 
@@ -56,22 +56,18 @@ struct DetectionTaskConfig
     std::optional<QString> taskId;
     std::optional<QString> sourceType;
     std::optional<QString> sourceUrl;
-    std::optional<double> imageSequenceFps;
     std::optional<bool> autoStart;
     std::optional<QString> productionLineId;
     std::optional<QString> batchId;
 
-    std::optional<QString> detectorBackend;
     std::optional<float> confidenceThreshold;
     std::optional<float> nmsThreshold;
-    std::optional<int> simulatedDelayMs;
     std::optional<int> detectEveryNFrames;
     std::optional<int> inputWidth;
     std::optional<int> inputHeight;
     std::optional<int> classCount;
     std::optional<int> maxDetections;
     std::optional<QString> onnxPath;
-    std::optional<QString> enginePath;
     std::optional<QString> labelsPath;
 };
 

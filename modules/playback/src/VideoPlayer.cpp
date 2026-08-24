@@ -17,9 +17,7 @@
 #include <QStringList>
 
 #include "inference/IDetector.h"
-#include "inference/MockDetector.h"
 #include "inference/YoloOpenCVDnnDetector.h"
-#include "inference/YoloTensorRTDetector.h"
 
 namespace
 {
@@ -90,18 +88,35 @@ float environmentFloat(const char* name, float fallback) // 读取浮点型环�
 }
 
 // 模型自动检索，查找yolo配置文件
-QString defaultYoloModelPath(const QString& filename)
+QString defaultFaceModelPath(const QString& filename)
 {
     const QString relativePath =
-        QDir(QStringLiteral("models/yolo11l")).filePath(filename);
+        QDir(QStringLiteral("models/yolov8-face")).filePath(filename);
 
     for (const QString& base : candidateProjectRoots())
     {
         const QFileInfo marker(
-            QDir(base).filePath(QStringLiteral("models/yolo11l/labels.txt")));
+            QDir(base).filePath(QStringLiteral("models/yolov8-face/labels.txt")));
         if (marker.exists())
         {
             return QFileInfo(QDir(base).filePath(relativePath)).absoluteFilePath();
+        }
+    }
+
+    return QFileInfo(relativePath).absoluteFilePath();
+}
+
+QString defaultFaceFeatureModelPath()
+{
+    const QString relativePath = QStringLiteral(
+        "models/face-recognition-sface/face_recognition_sface_2021dec.onnx");
+
+    for (const QString& base : candidateProjectRoots())
+    {
+        const QFileInfo candidate(QDir(base).filePath(relativePath));
+        if (candidate.exists())
+        {
+            return candidate.absoluteFilePath();
         }
     }
 
@@ -141,43 +156,19 @@ QString resolveConfiguredPath(const char* environmentName, const QString& fallba
 // 初始化检测配置
 ivp::DetectorConfig defaultDetectorConfig()
 {
-    const std::string backend = environmentValue("IVP_DETECTOR_BACKEND");
-    const bool useTensorRT =
-        backend == "tensorrt" || backend == "TensorRT" || backend == "TENSORRT";
-    const bool useOpenCVDnn =
-        backend == "opencv" || backend == "opencv_dnn"
-        || backend == "opencvdnn" || backend == "OpenCVDnn"
-        || backend == "OPENCV_DNN";
-
     ivp::DetectorConfig config;
-    if (useTensorRT)
-    {
-        config.backend = ivp::DetectorBackend::TensorRT;
-    }
-    else if (useOpenCVDnn)
-    {
-        config.backend = ivp::DetectorBackend::OpenCVDnn;
-    }
-    else
-    {
-        config.backend = ivp::DetectorBackend::Mock;
-    }
     config.confidenceThreshold = environmentFloat("IVP_YOLO_CONFIDENCE", 0.5F);
     config.nmsThreshold = environmentFloat("IVP_YOLO_NMS", 0.45F);
-    config.simulatedDelayMs = 8;
     config.detectEveryNFrames = 1;
     config.onnxPath = resolveConfiguredPath(
         "IVP_YOLO_ONNX",
-        defaultYoloModelPath(QStringLiteral("defect.onnx"))).toStdString();
-    config.enginePath = resolveConfiguredPath(
-        "IVP_YOLO_ENGINE",
-        defaultYoloModelPath(QStringLiteral("defect.engine"))).toStdString();
+        defaultFaceModelPath(QStringLiteral("face.onnx"))).toStdString();
     config.labelsPath = resolveConfiguredPath(
         "IVP_YOLO_LABELS",
-        defaultYoloModelPath(QStringLiteral("labels.txt"))).toStdString();
-    config.inputWidth = environmentInt("IVP_YOLO_INPUT_WIDTH", 1088);
-    config.inputHeight = environmentInt("IVP_YOLO_INPUT_HEIGHT", 1088);
-    config.classCount = environmentInt("IVP_YOLO_CLASS_COUNT", 0);
+        defaultFaceModelPath(QStringLiteral("labels.txt"))).toStdString();
+    config.inputWidth = environmentInt("IVP_YOLO_INPUT_WIDTH", 640);
+    config.inputHeight = environmentInt("IVP_YOLO_INPUT_HEIGHT", 640);
+    config.classCount = environmentInt("IVP_YOLO_CLASS_COUNT", 1);
     config.maxDetections = environmentInt("IVP_YOLO_MAX_DETECTIONS", 100);
     return config;
 }
@@ -194,18 +185,20 @@ void releaseFrameReference(void* frame)
 VideoPlayer::VideoPlayer(QObject* parent)
     : QObject(parent),
       decoder_(),
-      imageSequenceReader_(),
-      audioPlayer_(),
-      detector_(std::make_unique<ivp::MockDetector>()),
+      detector_(std::make_unique<ivp::YoloOpenCVDnnDetector>()),
       detectorConfig_(defaultDetectorConfig()),
       frameDispatcher_(kFrameQueueCapacity, kInferenceQueueCapacity),
       pendingFrame_(),
       frameTimer_(),
       fallbackClock_(),
+      runtimeStatusTimer_(),
+      runtimeFpsTimer_(),
       producerThread_(),
       inferenceThread_(),
       errorMutex_(),
       detectorMutex_(),
+      faceRecognizerMutex_(),
+      faceRecognizer_(),
       fileName_(),
       lastError_(),
       producerError_(),
@@ -213,41 +206,62 @@ VideoPlayer::VideoPlayer(QObject* parent)
       fallbackClockBaseMs_(0),
       pendingFramePositionMs_(0),
       lastVideoPositionMs_(0),
+      lastDecodedFramesSample_(0),
+      lastDisplayedFramesSample_(0),
+      lastInferredFramesSample_(0),
+      decodeFps_(0.0),
+      displayFps_(0.0),
+      runtimeInferenceFps_(0.0),
+      runtimeState_(ivp::RuntimeState::Idle),
+      decodedFrames_(0),
+      displayedFrames_(0),
+      inferredFrames_(0),
+      lateDroppedDisplayFrames_(0),
+      currentFrameIndex_(-1),
+      currentPtsMs_(0),
+      lastInferenceLatencyMs_(0),
       producerStopRequested_(false),
       producerFinished_(false),
       inferenceStopRequested_(false),
       playbackGeneration_(0),
-      hasAudio_(false),
       opened_(false),
       playing_(false),
       framePending_(false)
 {
     qRegisterMetaType<ivp::DetectionResults>("ivp::DetectionResults");
+    qRegisterMetaType<ivp::RuntimeStatus>("ivp::RuntimeStatus");
+    ivp::FaceRecognitionConfig faceRecognitionConfig;
+    faceRecognitionConfig.featureModelPath =
+        resolveConfiguredPath(
+            "IVP_FACE_FEATURE_ONNX",
+            defaultFaceFeatureModelPath()).toUtf8().toStdString();
+    faceRecognitionConfig.similarityThreshold = environmentFloat(
+        "IVP_FACE_SIMILARITY_THRESHOLD",
+        faceRecognitionConfig.similarityThreshold);
+    faceRecognitionConfig.minSimilarityMargin = environmentFloat(
+        "IVP_FACE_SIMILARITY_MARGIN",
+        faceRecognitionConfig.minSimilarityMargin);
+    faceRecognitionConfig.minFaceSizePixels = environmentInt(
+        "IVP_FACE_MIN_SIZE",
+        faceRecognitionConfig.minFaceSizePixels);
+    faceRecognitionConfig.facePaddingRatio = environmentFloat(
+        "IVP_FACE_PADDING_RATIO",
+        faceRecognitionConfig.facePaddingRatio);
+    faceRecognizer_.initialize(faceRecognitionConfig);
 
     frameTimer_.setTimerType(Qt::PreciseTimer);
     connect(&frameTimer_, &QTimer::timeout, this, &VideoPlayer::consumeNextFrame);
-    connect(&audioPlayer_, &AudioPlayer::errorOccurred, this, [this](const QString& message) {
-        // If audio fails after playback starts, keep video alive with the fallback clock.
-        if (hasAudio_)
-        {
-            fallbackClockBaseMs_ = audioPlayer_.positionMs();
-            fallbackClock_.restart();
-            hasAudio_ = false;
-            emit audioInfoChanged(false, 0, 0);
-        }
-
-        emit errorOccurred(message);
-    });
+    runtimeStatusTimer_.setInterval(500);
+    runtimeStatusTimer_.setTimerType(Qt::CoarseTimer);
+    connect(&runtimeStatusTimer_, &QTimer::timeout, this, &VideoPlayer::publishRuntimeStatus);
 }
 
 VideoPlayer::~VideoPlayer()
 {
+    runtimeStatusTimer_.stop();
     frameTimer_.stop();
     stopProducerThread();
-    audioPlayer_.stop();
-    audioPlayer_.close();
     decoder_.close();
-    imageSequenceReader_.close();
 }
 
 // 打开本地视频
@@ -262,12 +276,6 @@ bool VideoPlayer::openRtsp(const QString& rtspUrl)
     return openInput(VideoInputConfig::fromRtsp(rtspUrl));
 }
 
-// 打开图片序列文件夹
-bool VideoPlayer::openImageSequence(const QString& directoryPath, double fps)
-{
-    return openInput(VideoInputConfig::fromImageSequence(directoryPath, fps));
-}
-
 void VideoPlayer::setDetectorConfig(const ivp::DetectorConfig& config)
 {
     detectorConfig_ = config;
@@ -279,11 +287,13 @@ bool VideoPlayer::applyDetectorConfig(const ivp::DetectorConfig& config)
     detectorConfig_ = config;
     clearLastError();
 
-    std::lock_guard<std::mutex> lock(detectorMutex_);
-    if (!initializeDetector())
     {
-        detectorConfig_ = previousConfig;
-        return false;
+        std::lock_guard<std::mutex> lock(detectorMutex_);
+        if (!initializeDetector())
+        {
+            detectorConfig_ = previousConfig;
+            return false;
+        }
     }
 
     return true;
@@ -294,63 +304,75 @@ ivp::DetectorConfig VideoPlayer::detectorConfig() const
     return detectorConfig_;
 }
 
+bool VideoPlayer::applyFaceRecognitionConfig(
+    const ivp::FaceRecognitionConfig& config)
+{
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    if (!faceRecognizer_.initialize(config))
+    {
+        setLastError(QString::fromStdString(faceRecognizer_.lastError()));
+        return false;
+    }
+
+    clearLastError();
+    return true;
+}
+
+bool VideoPlayer::setFaceRecognitionGallery(
+    ivp::FaceFeatureTemplates templates)
+{
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    return faceRecognizer_.setGallery(std::move(templates));
+}
+
+ivp::FaceRecognitionConfig VideoPlayer::faceRecognitionConfig() const
+{
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    return faceRecognizer_.config();
+}
+
+std::size_t VideoPlayer::faceRecognitionGallerySize() const
+{
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    return faceRecognizer_.gallerySize();
+}
+
+std::string VideoPlayer::faceRecognitionLastError() const
+{
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    return faceRecognizer_.lastError();
+}
+
+ivp::FaceRecognitionDiagnostics VideoPlayer::faceRecognitionDiagnostics() const
+{
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    return faceRecognizer_.diagnostics();
+}
+
 bool VideoPlayer::openInput(const VideoInputConfig& config)
 {
     stop();
-    audioPlayer_.close();
     closeActiveInput();
     resetSyncState();
+    resetRuntimeMetrics();
+    setRuntimeState(ivp::RuntimeState::Idle);
     clearLastError();
     clearProducerError();
-    hasAudio_ = false;
-
-    bool inputOpened = false;
-    if (config.sourceType == VideoSourceType::ImageSequence)
-    {
-        inputOpened = imageSequenceReader_.open(config);
-    }
-    else
-    {
-        inputOpened = decoder_.open(config);
-    }
+    const bool inputOpened = decoder_.open(config);
 
     if (!inputOpened)
     {
-        const QString inputError = config.sourceType == VideoSourceType::ImageSequence
-            ? imageSequenceReader_.lastError()
-            : decoder_.lastError();
+        const QString inputError = decoder_.lastError();
         closeActiveInput();
         opened_ = false;
         fileName_.clear();
         sourceType_ = VideoSourceType::File;
-        emitState();
-        emit audioInfoChanged(false, 0, 0);
         setLastError(inputError);
+        setRuntimeState(ivp::RuntimeState::Error);
+        emitState();
+        publishRuntimeStatus();
         emit errorOccurred(inputError);
         return false;
-    }
-
-    if (config.sourceType == VideoSourceType::File)
-    {
-        hasAudio_ = audioPlayer_.open(config.url);
-        if (hasAudio_)
-        {
-            emit audioInfoChanged(true, audioPlayer_.sampleRate(), audioPlayer_.channels());
-        }
-        else
-        {
-            // No audio stream is acceptable. A real audio error is still useful feedback.
-            if (!audioPlayer_.lastError().isEmpty())
-            {
-                emit errorOccurred(audioPlayer_.lastError());
-            }
-            emit audioInfoChanged(false, 0, 0);
-        }
-    }
-    else
-    {
-        // RTSP and image sequence inputs are video-first in this demo stage.
-        emit audioInfoChanged(false, 0, 0);
     }
 
     fileName_ = config.url;
@@ -362,13 +384,11 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
         opened_ = false;
         fileName_.clear();
         sourceType_ = VideoSourceType::File;
-        hasAudio_ = false;
-        audioPlayer_.stop();
-        audioPlayer_.close();
         closeActiveInput();
-        emit audioInfoChanged(false, 0, 0);
+        setRuntimeState(ivp::RuntimeState::Error);
         emit errorOccurred(currentLastError());
         emitState();
+        publishRuntimeStatus();
         return false;
     }
 
@@ -377,13 +397,11 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
         opened_ = false;
         fileName_.clear();
         sourceType_ = VideoSourceType::File;
-        hasAudio_ = false;
-        audioPlayer_.stop();
-        audioPlayer_.close();
         closeActiveInput();
-        emit audioInfoChanged(false, 0, 0);
+        setRuntimeState(ivp::RuntimeState::Error);
         emit errorOccurred(currentLastError());
         emitState();
+        publishRuntimeStatus();
         return false;
     }
 
@@ -392,7 +410,9 @@ bool VideoPlayer::openInput(const VideoInputConfig& config)
         activeInputHeight(),
         activeInputFrameRate(),
         activeInputDurationMs());
+    setRuntimeState(ivp::RuntimeState::Ready);
     emitState();
+    publishRuntimeStatus();
     return true;
 }
 
@@ -412,13 +432,15 @@ void VideoPlayer::play()
 
     playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
     playing_ = true;
-    fallbackClock_.restart();
-    if (hasAudio_)
+    setRuntimeState(ivp::RuntimeState::Running);
+    if (!runtimeStatusTimer_.isActive())
     {
-        audioPlayer_.play();
+        runtimeStatusTimer_.start();
     }
+    fallbackClock_.restart();
     frameTimer_.start(0);
     emitState();
+    publishRuntimeStatus();
 }
 
 // 暂停
@@ -432,30 +454,28 @@ void VideoPlayer::pause()
     frameTimer_.stop();
     playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
     fallbackClockBaseMs_ = masterClockMs();
-    if (hasAudio_)
-    {
-        audioPlayer_.pause();
-    }
     playing_ = false;
+    setRuntimeState(ivp::RuntimeState::Paused);
     emitState();
+    publishRuntimeStatus();
 }
 
 // 停止
 void VideoPlayer::stop()
 {
     frameTimer_.stop();
+    runtimeStatusTimer_.stop();
     playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
-    if (hasAudio_)
+    if (opened_ || playing_)
     {
-        audioPlayer_.stop();
+        setRuntimeState(ivp::RuntimeState::Stopping);
     }
     playing_ = false;
 
     if (opened_)
     {
         stopProducerThread();
-        if (sourceType_ == VideoSourceType::File
-            || sourceType_ == VideoSourceType::ImageSequence)
+        if (sourceType_ == VideoSourceType::File)
         {
             seekActiveInputToStart();
         }
@@ -469,7 +489,9 @@ void VideoPlayer::stop()
     }
 
     resetSyncState();
+    setRuntimeState(opened_ ? ivp::RuntimeState::Ready : ivp::RuntimeState::Idle);
     emitState();
+    publishRuntimeStatus();
 }
 
 bool VideoPlayer::isOpened() const
@@ -495,6 +517,93 @@ QString VideoPlayer::fileName() const
 QString VideoPlayer::lastError() const
 {
     return currentLastError();
+}
+
+ivp::RuntimeStatus VideoPlayer::runtimeStatus() const
+{
+    ivp::RuntimeStatus status;
+    status.state = runtimeState_;
+    status.metrics.decodedFrames = decodedFrames_.load();
+    status.metrics.displayedFrames = displayedFrames_.load();
+    status.metrics.inferredFrames = inferredFrames_.load();
+    status.metrics.droppedDisplayFrames =
+        frameDispatcher_.droppedDisplayFrames() + lateDroppedDisplayFrames_.load();
+    status.metrics.droppedInferenceFrames = frameDispatcher_.droppedInferenceFrames();
+    status.metrics.decodeFps = decodeFps_;
+    status.metrics.displayFps = displayFps_;
+    status.metrics.inferenceFps = runtimeInferenceFps_;
+    status.metrics.displayQueueSize = frameDispatcher_.displayQueueSize();
+    status.metrics.inferenceQueueSize = frameDispatcher_.inferenceQueueSize();
+    status.metrics.currentFrameIndex = currentFrameIndex_.load();
+    status.metrics.currentPtsMs = currentPtsMs_.load();
+    status.metrics.lastInferenceLatencyMs = lastInferenceLatencyMs_.load();
+    status.lastError = currentLastError().toStdString();
+    return status;
+}
+
+void VideoPlayer::publishRuntimeStatus()
+{
+    updateRuntimeFpsSample();
+    emit runtimeStatusChanged(runtimeStatus());
+}
+
+void VideoPlayer::resetRuntimeMetrics()
+{
+    decodedFrames_.store(0);
+    displayedFrames_.store(0);
+    inferredFrames_.store(0);
+    lateDroppedDisplayFrames_.store(0);
+    currentFrameIndex_.store(-1);
+    currentPtsMs_.store(0);
+    lastInferenceLatencyMs_.store(0);
+    lastDecodedFramesSample_ = 0;
+    lastDisplayedFramesSample_ = 0;
+    lastInferredFramesSample_ = 0;
+    decodeFps_ = 0.0;
+    displayFps_ = 0.0;
+    runtimeInferenceFps_ = 0.0;
+    runtimeFpsTimer_.invalidate();
+}
+
+void VideoPlayer::updateRuntimeFpsSample()
+{
+    if (!runtimeFpsTimer_.isValid())
+    {
+        runtimeFpsTimer_.start();
+        lastDecodedFramesSample_ = decodedFrames_.load();
+        lastDisplayedFramesSample_ = displayedFrames_.load();
+        lastInferredFramesSample_ = inferredFrames_.load();
+        return;
+    }
+
+    const qint64 elapsedMs = runtimeFpsTimer_.elapsed();
+    if (elapsedMs < 500)
+    {
+        return;
+    }
+
+    const std::int64_t decodedFrames = decodedFrames_.load();
+    const std::int64_t displayedFrames = displayedFrames_.load();
+    const std::int64_t inferredFrames = inferredFrames_.load();
+
+    const std::int64_t decodedDelta = decodedFrames - lastDecodedFramesSample_;
+    const std::int64_t displayedDelta = displayedFrames - lastDisplayedFramesSample_;
+    const std::int64_t inferredDelta = inferredFrames - lastInferredFramesSample_;
+
+    const double seconds = std::max<qint64>(1, elapsedMs) / 1000.0;
+    decodeFps_ = static_cast<double>(decodedDelta) / seconds;
+    displayFps_ = static_cast<double>(displayedDelta) / seconds;
+    runtimeInferenceFps_ = static_cast<double>(inferredDelta) / seconds;
+
+    lastDecodedFramesSample_ = decodedFrames;
+    lastDisplayedFramesSample_ = displayedFrames;
+    lastInferredFramesSample_ = inferredFrames;
+    runtimeFpsTimer_.restart();
+}
+
+void VideoPlayer::setRuntimeState(ivp::RuntimeState state)
+{
+    runtimeState_ = state;
 }
 
 // 定时器定时触发
@@ -550,11 +659,12 @@ void VideoPlayer::consumeFileFrame()
         return;
     }
 
-    if (hasAudio_ && delayMs < -120)
+    if (delayMs < -120)
     {
-        // Audio is the master clock. If video falls far behind, drop frames to catch up.
+        // If video falls far behind the software clock, drop frames to catch up.
         pendingFrame_.reset();
         framePending_ = false;
+        lateDroppedDisplayFrames_.fetch_add(1, std::memory_order_relaxed);
         frameTimer_.start(0);
         return;
     }
@@ -564,6 +674,9 @@ void VideoPlayer::consumeFileFrame()
     if (!image.isNull())
     {
         lastVideoPositionMs_ = pendingFramePositionMs_;
+        displayedFrames_.fetch_add(1, std::memory_order_relaxed);
+        currentFrameIndex_.store(frameIndex, std::memory_order_relaxed);
+        currentPtsMs_.store(pendingFramePositionMs_, std::memory_order_relaxed);
         emit frameReady(image, pendingFramePositionMs_, frameIndex);
     }
 
@@ -606,6 +719,9 @@ void VideoPlayer::consumeRtspFrame()
     if (!image.isNull())
     {
         lastVideoPositionMs_ = positionMs;
+        displayedFrames_.fetch_add(1, std::memory_order_relaxed);
+        currentFrameIndex_.store(frameIndex, std::memory_order_relaxed);
+        currentPtsMs_.store(positionMs, std::memory_order_relaxed);
         emit frameReady(image, positionMs, frameIndex);
     }
 
@@ -629,11 +745,6 @@ int VideoPlayer::playbackIntervalMs() const
 
 qint64 VideoPlayer::masterClockMs() const
 {
-    if (hasAudio_ && audioPlayer_.isOpen())
-    {
-        return audioPlayer_.positionMs();
-    }
-
     if (playing_ && fallbackClock_.isValid())
     {
         return fallbackClockBaseMs_ + fallbackClock_.elapsed();
@@ -669,66 +780,42 @@ QImage VideoPlayer::convertFrameToImage(ivp::VideoFramePtr frame) const
 
 bool VideoPlayer::readNextInputFrame(ivp::VideoFrame* frame)
 {
-    if (sourceType_ == VideoSourceType::ImageSequence)
-    {
-        return imageSequenceReader_.readFrame(frame);
-    }
-
     return decoder_.readFrame(frame);
 }
 
 QString VideoPlayer::activeInputLastError() const
 {
-    if (sourceType_ == VideoSourceType::ImageSequence)
-    {
-        return imageSequenceReader_.lastError();
-    }
-
     return decoder_.lastError();
 }
 
 bool VideoPlayer::seekActiveInputToStart()
 {
-    if (sourceType_ == VideoSourceType::ImageSequence)
-    {
-        return imageSequenceReader_.seekToStart();
-    }
-
     return decoder_.seekToStart();
 }
 
 void VideoPlayer::closeActiveInput()
 {
     decoder_.close();
-    imageSequenceReader_.close();
 }
 
 int VideoPlayer::activeInputWidth() const
 {
-    return sourceType_ == VideoSourceType::ImageSequence
-        ? imageSequenceReader_.width()
-        : decoder_.width();
+    return decoder_.width();
 }
 
 int VideoPlayer::activeInputHeight() const
 {
-    return sourceType_ == VideoSourceType::ImageSequence
-        ? imageSequenceReader_.height()
-        : decoder_.height();
+    return decoder_.height();
 }
 
 double VideoPlayer::activeInputFrameRate() const
 {
-    return sourceType_ == VideoSourceType::ImageSequence
-        ? imageSequenceReader_.frameRate()
-        : decoder_.frameRate();
+    return decoder_.frameRate();
 }
 
 qint64 VideoPlayer::activeInputDurationMs() const
 {
-    return sourceType_ == VideoSourceType::ImageSequence
-        ? imageSequenceReader_.durationMs()
-        : decoder_.durationMs();
+    return decoder_.durationMs();
 }
 
 bool VideoPlayer::startProducerThread()
@@ -786,7 +873,6 @@ void VideoPlayer::stopProducerThread()
     }
 
     decoder_.clearInterruptRequest();
-    frameDispatcher_.reset();
     producerStopRequested_.store(false);
     inferenceStopRequested_.store(false);
     producerFinished_.store(false);
@@ -810,6 +896,7 @@ void VideoPlayer::producerLoop()
             frame.metadata.ptsMs = std::max<qint64>(
                 0,
                 frame.metadata.ptsMs - firstInputPtsMs);
+            decodedFrames_.fetch_add(1, std::memory_order_relaxed);
 
             const ivp::FrameQueuePolicy displayPolicy = sourceType_ == VideoSourceType::Rtsp
                 ? ivp::FrameQueuePolicy::DropOldest
@@ -882,6 +969,8 @@ void VideoPlayer::inferenceLoop()
         ivp::DetectionResults results;
         std::string detectorError;
         std::string detectorName;
+        QElapsedTimer inferenceTimer;
+        inferenceTimer.start();
         {
             std::lock_guard<std::mutex> lock(detectorMutex_);
             if (detector_ == nullptr)
@@ -903,8 +992,12 @@ void VideoPlayer::inferenceLoop()
             break;
         }
 
+        applyFaceRecognition(*frame, &results);
+
         ++consumedFrames;
         detectedObjects += static_cast<qint64>(results.size());
+        inferredFrames_.fetch_add(1, std::memory_order_relaxed);
+        lastInferenceLatencyMs_.store(inferenceTimer.elapsed(), std::memory_order_relaxed);
 
         const QImage detectionImage = convertFrameToImage(frame);
 
@@ -928,6 +1021,9 @@ void VideoPlayer::inferenceLoop()
                 emit detectionResultsReady(results, frameIndex, ptsMs, sourceId);
                 if (!detectionImage.isNull())
                 {
+                    displayedFrames_.fetch_add(1, std::memory_order_relaxed);
+                    currentFrameIndex_.store(frameIndex, std::memory_order_relaxed);
+                    currentPtsMs_.store(ptsMs, std::memory_order_relaxed);
                     emit detectionFrameReady(
                         detectionImage,
                         results,
@@ -957,16 +1053,15 @@ void VideoPlayer::handleProducerFinished()
     const QString message = producerError();
 
     frameTimer_.stop();
-    if (hasAudio_)
-    {
-        audioPlayer_.stop();
-    }
+    runtimeStatusTimer_.stop();
+    playbackGeneration_.fetch_add(1, std::memory_order_relaxed);
 
     playing_ = false;
     stopProducerThread();
 
     if (message.isEmpty())
     {
+        setRuntimeState(ivp::RuntimeState::Completed);
         if (sourceType_ == VideoSourceType::Rtsp)
         {
             opened_ = false;
@@ -975,6 +1070,7 @@ void VideoPlayer::handleProducerFinished()
             sourceType_ = VideoSourceType::File;
             resetSyncState();
             emitState();
+            publishRuntimeStatus();
             return;
         }
 
@@ -988,13 +1084,16 @@ void VideoPlayer::handleProducerFinished()
             closeActiveInput();
             setLastError(seekError);
             resetSyncState();
+            setRuntimeState(ivp::RuntimeState::Error);
             emit errorOccurred(seekError);
             emitState();
+            publishRuntimeStatus();
             return;
         }
 
         resetSyncState();
         emitState();
+        publishRuntimeStatus();
         return;
     }
 
@@ -1004,8 +1103,10 @@ void VideoPlayer::handleProducerFinished()
     closeActiveInput();
     resetSyncState();
     setLastError(message);
+    setRuntimeState(ivp::RuntimeState::Error);
     emit errorOccurred(message);
     emitState();
+    publishRuntimeStatus();
 }
 
 void VideoPlayer::setLastError(const QString& message)
@@ -1075,17 +1176,14 @@ bool VideoPlayer::initializeDetector()
     ivp::DetectorConfig config = detectorConfig_;
 
     std::unique_ptr<ivp::IDetector> candidate;
-    if (config.backend == ivp::DetectorBackend::TensorRT)
-    {
-        candidate = std::make_unique<ivp::YoloTensorRTDetector>();
-    }
-    else if (config.backend == ivp::DetectorBackend::OpenCVDnn)
+    if (config.backend == ivp::DetectorBackend::OpenCVDnn)
     {
         candidate = std::make_unique<ivp::YoloOpenCVDnnDetector>();
     }
     else
     {
-        candidate = std::make_unique<ivp::MockDetector>();
+        setLastError(QStringLiteral("This build only supports OpenCV DNN face detection."));
+        return false;
     }
 
     if (candidate == nullptr)
@@ -1094,10 +1192,6 @@ bool VideoPlayer::initializeDetector()
         return false;
     }
 
-    if (config.simulatedDelayMs < 0)
-    {
-        config.simulatedDelayMs = kMockInferenceDelayMs;
-    }
     if (config.detectEveryNFrames <= 0)
     {
         config.detectEveryNFrames = 1;
@@ -1118,4 +1212,22 @@ bool VideoPlayer::initializeDetector()
 
     detector_ = std::move(candidate);
     return true;
+}
+
+void VideoPlayer::applyFaceRecognition(
+    const ivp::VideoFrame& frame,
+    ivp::DetectionResults* results)
+{
+    if (results == nullptr)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(faceRecognizerMutex_);
+    for (ivp::DetectionResult& result : *results)
+    {
+        const ivp::FaceRecognitionResult recognition =
+            faceRecognizer_.recognize(frame, result);
+        result.face = recognition;
+    }
 }

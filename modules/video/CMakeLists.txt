@@ -1,9 +1,7 @@
 add_library(ivp_video STATIC
     src/FFmpegDecoder.cpp
-    src/ImageSequenceReader.cpp
     src/FrameConverter.cpp
     include/video/FFmpegDecoder.h
-    include/video/ImageSequenceReader.h
     include/video/FrameConverter.h
     include/video/VideoInputConfig.h
 )

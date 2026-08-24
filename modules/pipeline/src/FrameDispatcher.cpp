@@ -7,7 +7,9 @@ namespace ivp
 
 FrameDispatcher::FrameDispatcher(std::size_t displayCapacity, std::size_t inferenceCapacity)
     : displayQueue_(displayCapacity),
-      inferenceQueue_(inferenceCapacity)
+      inferenceQueue_(inferenceCapacity),
+      droppedDisplayFrames_(0),
+      droppedInferenceFrames_(0)
 {
 }
 
@@ -18,12 +20,16 @@ bool FrameDispatcher::dispatch(
 {
     auto sharedFrame = std::make_shared<VideoFrame>(std::move(frame));
 
-    if (!pushFrame(&displayQueue_, sharedFrame, displayPolicy))
+    if (!pushFrame(&displayQueue_, sharedFrame, displayPolicy, &droppedDisplayFrames_))
     {
         return false;
     }
 
-    return pushFrame(&inferenceQueue_, std::move(sharedFrame), inferencePolicy);
+    return pushFrame(
+        &inferenceQueue_,
+        std::move(sharedFrame),
+        inferencePolicy,
+        &droppedInferenceFrames_);
 }
 
 bool FrameDispatcher::tryPopDisplay(VideoFramePtr* frame)
@@ -46,6 +52,8 @@ void FrameDispatcher::reset()
 {
     displayQueue_.reset();
     inferenceQueue_.reset();
+    droppedDisplayFrames_.store(0);
+    droppedInferenceFrames_.store(0);
 }
 
 void FrameDispatcher::clear()
@@ -64,10 +72,21 @@ std::size_t FrameDispatcher::inferenceQueueSize() const
     return inferenceQueue_.size();
 }
 
+std::int64_t FrameDispatcher::droppedDisplayFrames() const
+{
+    return droppedDisplayFrames_.load();
+}
+
+std::int64_t FrameDispatcher::droppedInferenceFrames() const
+{
+    return droppedInferenceFrames_.load();
+}
+
 bool FrameDispatcher::pushFrame(
     BlockingQueue<VideoFramePtr>* queue,
     VideoFramePtr frame,
-    FrameQueuePolicy policy)
+    FrameQueuePolicy policy,
+    std::atomic<std::int64_t>* droppedFrames)
 {
     if (queue == nullptr || frame == nullptr)
     {
@@ -76,7 +95,13 @@ bool FrameDispatcher::pushFrame(
 
     if (policy == FrameQueuePolicy::DropOldest)
     {
-        return queue->pushDropOldest(std::move(frame));
+        bool dropped = false;
+        const bool pushed = queue->pushDropOldest(std::move(frame), &dropped);
+        if (pushed && dropped && droppedFrames != nullptr)
+        {
+            droppedFrames->fetch_add(1);
+        }
+        return pushed;
     }
 
     return queue->push(std::move(frame));

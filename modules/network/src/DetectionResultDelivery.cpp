@@ -45,6 +45,26 @@ QJsonObject detectionToJson(
     box.insert(QStringLiteral("width"), result.box.width);
     box.insert(QStringLiteral("height"), result.box.height);
     object.insert(QStringLiteral("box"), box);
+
+    QJsonObject face;
+    face.insert(QStringLiteral("matched"), result.face.matched);
+    if (result.face.matched)
+    {
+        face.insert(QStringLiteral("face_id"),
+                    result.face.faceId.has_value()
+                        ? static_cast<double>(*result.face.faceId)
+                        : 0.0);
+        face.insert(QStringLiteral("face_code"),
+                    QString::fromStdString(result.face.faceCode));
+        face.insert(QStringLiteral("face_name"),
+                    QString::fromStdString(result.face.faceName));
+        face.insert(QStringLiteral("distance"), result.face.distance);
+        face.insert(QStringLiteral("similarity"), result.face.similarity);
+        face.insert(QStringLiteral("threshold"), result.face.threshold);
+        face.insert(QStringLiteral("recognizer"),
+                    QString::fromStdString(result.face.recognizerName));
+    }
+    object.insert(QStringLiteral("face"), face);
     return object;
 }
 
@@ -366,6 +386,8 @@ QByteArray DetectionResultDelivery::csvPayload(
             ? QString::fromStdString(packet.sourceId)
             : QString::fromStdString(result.sourceId);
         const QString className = QString::fromStdString(result.className);
+        const QString faceCode = QString::fromStdString(result.face.faceCode);
+        const QString faceName = QString::fromStdString(result.face.faceName);
         const QList<QByteArray> columns = {
             escapeCsv(QString::fromStdString(packet.taskId)),
             escapeCsv(QString::fromStdString(packet.productionLineId)),
@@ -380,7 +402,15 @@ QByteArray DetectionResultDelivery::csvPayload(
             QByteArray::number(result.box.x, 'f', 3),
             QByteArray::number(result.box.y, 'f', 3),
             QByteArray::number(result.box.width, 'f', 3),
-            QByteArray::number(result.box.height, 'f', 3)};
+            QByteArray::number(result.box.height, 'f', 3),
+            QByteArray::number(
+                result.face.faceId.has_value() ? *result.face.faceId : 0),
+            escapeCsv(faceCode),
+            escapeCsv(faceName),
+            QByteArray::number(result.face.distance, 'f', 6),
+            QByteArray::number(result.face.similarity, 'f', 6),
+            QByteArray::number(result.face.threshold, 'f', 6),
+            escapeCsv(QString::fromStdString(result.face.recognizerName))};
 
         for (int i = 0; i < columns.size(); ++i)
         {
@@ -401,7 +431,9 @@ QByteArray DetectionResultDelivery::csvHeader()
     return QByteArray(
         "task_id,production_line_id,batch_id,source_id,"
         "frame_index,pts_ms,recorded_at_ms,class_id,"
-        "class_name,confidence,box_x,box_y,box_width,box_height\r\n");
+        "class_name,confidence,box_x,box_y,box_width,box_height,"
+        "face_id,face_code,face_name,face_distance,face_similarity,"
+        "face_threshold,face_recognizer\r\n");
 }
 
 QByteArray DetectionResultDelivery::escapeCsv(const QString& value)

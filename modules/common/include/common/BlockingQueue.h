@@ -42,7 +42,7 @@ public:
         return true;
     }
 
-    bool pushDropOldest(T value)
+    bool pushDropOldest(T value, bool* dropped = nullptr)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_)
@@ -50,12 +50,18 @@ public:
             return false;
         }
 
+        bool didDrop = false;
         if (capacity_ > 0 && queue_.size() >= capacity_)
         {
             queue_.pop_front();
+            didDrop = true;
         }
 
         queue_.push_back(std::move(value));
+        if (dropped != nullptr)
+        {
+            *dropped = didDrop;
+        }
         notEmpty_.notify_one();
         return true;
     }

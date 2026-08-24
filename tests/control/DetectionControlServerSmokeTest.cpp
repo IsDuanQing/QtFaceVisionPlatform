@@ -157,7 +157,6 @@ int main(int argc, char** argv)
     configureTask.insert(QStringLiteral("auto_start"), false);
     configureTask.insert(QStringLiteral("production_line_id"), QStringLiteral("line-a"));
     configureTask.insert(QStringLiteral("batch_id"), QStringLiteral("batch-20260812"));
-    configureTask.insert(QStringLiteral("detector_backend"), QStringLiteral("opencv"));
     configureTask.insert(QStringLiteral("confidence_threshold"), 0.62);
     configureTask.insert(QStringLiteral("detect_every_n_frames"), 3);
     writeCommand(socketA, configureTask);
@@ -173,8 +172,6 @@ int main(int argc, char** argv)
     assert(!*taskConfig.autoStart);
     assert(taskConfig.confidenceThreshold.has_value());
     assert(*taskConfig.confidenceThreshold > 0.61F);
-    assert(taskConfig.detectorBackend.has_value());
-    assert(*taskConfig.detectorBackend == QStringLiteral("opencv_dnn"));
 
     QJsonObject invalidTask;
     invalidTask.insert(QStringLiteral("type"), QStringLiteral("configure_task"));
@@ -243,9 +240,20 @@ int main(int argc, char** argv)
     broadcastStatus.videoHeight = 1080;
     broadcastStatus.videoFps = 25.0;
     broadcastStatus.durationMs = 60000;
-    broadcastStatus.audioAvailable = true;
-    broadcastStatus.audioSampleRate = 48000;
-    broadcastStatus.audioChannels = 2;
+    broadcastStatus.runtime.state = ivp::RuntimeState::Running;
+    broadcastStatus.runtime.metrics.decodedFrames = 120;
+    broadcastStatus.runtime.metrics.displayedFrames = 118;
+    broadcastStatus.runtime.metrics.inferredFrames = 100;
+    broadcastStatus.runtime.metrics.droppedDisplayFrames = 2;
+    broadcastStatus.runtime.metrics.droppedInferenceFrames = 20;
+    broadcastStatus.runtime.metrics.decodeFps = 25.0;
+    broadcastStatus.runtime.metrics.displayFps = 24.6;
+    broadcastStatus.runtime.metrics.inferenceFps = 20.8;
+    broadcastStatus.runtime.metrics.displayQueueSize = 1;
+    broadcastStatus.runtime.metrics.inferenceQueueSize = 2;
+    broadcastStatus.runtime.metrics.currentFrameIndex = 118;
+    broadcastStatus.runtime.metrics.currentPtsMs = 4720;
+    broadcastStatus.runtime.metrics.lastInferenceLatencyMs = 18;
     broadcastStatus.message = QStringLiteral("Broadcast ready");
     server.setStatusSnapshot(broadcastStatus);
     server.publishStatusSnapshot();
@@ -257,6 +265,11 @@ int main(int argc, char** argv)
     assert(broadcastStatusA.value(QStringLiteral("connected_clients")).toInt() == 2);
     assert(broadcastStatusB.value(QStringLiteral("connected_clients")).toInt() == 2);
     assert(broadcastStatusA.value(QStringLiteral("message")).toString() == QStringLiteral("Broadcast ready"));
+    assert(broadcastStatusA.value(QStringLiteral("runtime_state")).toString() == QStringLiteral("Running"));
+    assert(broadcastStatusA.value(QStringLiteral("decoded_frames")).toInt() == 120);
+    assert(broadcastStatusA.value(QStringLiteral("displayed_frames")).toInt() == 118);
+    assert(broadcastStatusA.value(QStringLiteral("dropped_inference_frames")).toInt() == 20);
+    assert(broadcastStatusA.value(QStringLiteral("current_frame_index")).toInt() == 118);
 
     server.stop();
     std::cout << "Detection control server smoke test passed.\n";

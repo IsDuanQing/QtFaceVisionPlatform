@@ -38,6 +38,7 @@ private:
         ConfidenceColumn,
         BoxColumn,
         ObjectCountColumn,
+        FaceColumn,
         InputColumn,
         ColumnCountValue
     };

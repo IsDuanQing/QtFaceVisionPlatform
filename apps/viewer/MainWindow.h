@@ -11,14 +11,17 @@
 
 #include "control/DetectionControlServer.h"
 #include "common/DetectionResult.h"
+#include "common/RuntimeStatus.h"
 #include "network/DetectionResultDelivery.h"
 #include "playback/VideoPlayer.h"
+#include "recognition/FaceRecognizer.h"
 #include "results/ResultManager.h"
 #include "storage/SQLiteDetectionStorage.h"
 #include "ViewerSettingsStore.h"
 #include "VideoDisplayWidget.h"
 
 class DetectionHistoryTableModel;
+class FaceLibraryTableModel;
 class QCheckBox;
 class QComboBox;
 class QDateTimeEdit;
@@ -39,8 +42,6 @@ public:
 private slots:
     void openVideo();
     void openRtspStream();
-    void openImageSequence();
-    void openFaceDemo();
     void togglePlayPause();
     void stopVideo();
     void displayFrame(const QImage& image, qint64 positionMs, qint64 frameIndex);
@@ -57,16 +58,22 @@ private slots:
         const QString& sourceId);
     void updatePlayerState(bool opened, bool playing);
     void updateVideoInfo(int width, int height, double fps, qint64 durationMs);
-    void updateAudioInfo(bool available, int sampleRate, int channels);
+    void updateRuntimeStatus(const ivp::RuntimeStatus& status);
     void showPlayerError(const QString& message);
     void refreshHistory();
+    void refreshFaceLibrary();
     void clearHistoryFilters();
     void browseOnnxPath();
-    void browseEnginePath();
     void browseLabelsPath();
     void browseExportDirectory();
+    void browseFaceImagePath();
     void applyDetectorSettings();
+    void applyFaceRecognitionSettings();
     void applyFaceDetectorPreset();
+    void addFaceIdentity();
+    void removeSelectedFaceIdentity();
+    void bindSelectedHistoryFace();
+    void clearSelectedHistoryFace();
     void clearDetectionOverlay();
     void restoreDefaultSettings();
     void updateDeliveryStatus(bool connected, const QString& message);
@@ -84,10 +91,12 @@ private:
     void applyStyle();
     void connectSignals();
     QWidget* createHistoryPanel();
+    QWidget* createFaceLibraryPanel();
     QWidget* createSettingsPanel();
     void initializeStorage();
     void initializeControlService();
     void applyCurrentDetectorConfig();
+    bool applyCurrentFaceRecognitionConfig();
     void applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config);
     void restoreViewerSettings();
     void saveViewerSettings();
@@ -95,6 +104,8 @@ private:
     ivp::viewer::ViewerSettings collectViewerSettings() const;
     void loadDetectorConfig(const ivp::DetectorConfig& config);
     ivp::DetectorConfig collectDetectorConfig() const;
+    void loadFaceRecognitionConfig(const ivp::FaceRecognitionConfig& config);
+    ivp::FaceRecognitionConfig collectFaceRecognitionConfig() const;
     void loadDeliveryConfig(const ivp::DetectionDeliverySettings& config);
     ivp::DetectionDeliverySettings collectDeliveryConfig() const;
     void applyCurrentDeliveryConfig();
@@ -107,6 +118,10 @@ private:
     void startStorageSession(const QString& inputUrl);
     void finishStorageSession();
     void reloadHistorySessions();
+    void reloadFaceIdentities();
+    void reloadFaceRecognitionGallery();
+    bool rebuildFaceRecognitionGalleryFromReferences();
+    void updateFaceRecognitionDiagnostics();
     ivp::DetectionHistoryQuery collectHistoryQuery() const;
     void resetDetectionSummary();
     void updateDetectionSummary();
@@ -117,6 +132,7 @@ private:
     void updateInferenceFps(qint64 frameIndex);
     void syncControlStatus(bool publish = false);
     QString formatControlStatus(const ivp::DetectionControlStatus& status) const;
+    QString formatRuntimeSummary(const ivp::RuntimeStatus& status) const;
     QString formatDuration(qint64 milliseconds) const;
     QString formatSessionLabel(const ivp::InspectionSessionSummary& session) const;
 
@@ -125,6 +141,7 @@ private:
     ivp::ResultManager resultManager_;
     ivp::SQLiteDetectionStorage detectionStorage_;
     ivp::DetectionResultDelivery detectionDelivery_;
+    ivp::FaceRecognizer faceReferenceRecognizer_;
     ivp::viewer::ViewerSettingsStore settingsStore_;
     ivp::viewer::ViewerSettings defaultViewerSettings_;
     std::int64_t storageSessionId_;
@@ -135,7 +152,6 @@ private:
     QLabel* resolutionValueLabel_;
     QLabel* fpsValueLabel_;
     QLabel* durationValueLabel_;
-    QLabel* audioValueLabel_;
     QLabel* statusValueLabel_;
     QLabel* positionValueLabel_;
     QLabel* detectionValueLabel_;
@@ -143,6 +159,7 @@ private:
     QLabel* controlStatusLabel_;
     QLabel* historyStatusLabel_;
     QLabel* deliveryStatusLabel_;
+    QLabel* runtimeSummaryValueLabel_;
     QLabel* displayedFrameValueLabel_;
     QLabel* detectedFrameValueLabel_;
     QLabel* previewLagValueLabel_;
@@ -150,8 +167,6 @@ private:
 
     QPushButton* openButton_;
     QPushButton* rtspButton_;
-    QPushButton* imageSequenceButton_;
-    QPushButton* faceDemoButton_;
     QPushButton* playPauseButton_;
     QPushButton* stopButton_;
     QPushButton* historyRefreshButton_;
@@ -163,7 +178,9 @@ private:
     QPushButton* exportBrowseButton_;
 
     DetectionHistoryTableModel* historyModel_;
+    FaceLibraryTableModel* faceLibraryModel_;
     QTableView* historyTableView_;
+    QTableView* faceLibraryTableView_;
     QComboBox* historySessionCombo_;
     QLineEdit* historySourceEdit_;
     QLineEdit* historyClassEdit_;
@@ -172,8 +189,10 @@ private:
     QDateTimeEdit* historyStartEdit_;
     QDateTimeEdit* historyEndEdit_;
     QSpinBox* historyLimitSpinBox_;
+    QComboBox* historyFaceCombo_;
+    QPushButton* historyFaceBindButton_;
+    QPushButton* historyFaceClearButton_;
 
-    QComboBox* detectorBackendCombo_;
     QDoubleSpinBox* confidenceSpinBox_;
     QDoubleSpinBox* nmsSpinBox_;
     QSpinBox* maxDetectionsSpinBox_;
@@ -181,11 +200,13 @@ private:
     QSpinBox* inputHeightSpinBox_;
     QSpinBox* classCountSpinBox_;
     QSpinBox* detectEverySpinBox_;
-    QSpinBox* mockDelaySpinBox_;
-    QDoubleSpinBox* imageSequenceFpsSpinBox_;
     QLineEdit* onnxPathEdit_;
-    QLineEdit* enginePathEdit_;
     QLineEdit* labelsPathEdit_;
+    QLineEdit* faceFeatureModelPathEdit_;
+    QDoubleSpinBox* faceRecognitionThresholdSpinBox_;
+    QDoubleSpinBox* faceRecognitionMarginSpinBox_;
+    QSpinBox* faceRecognitionMinFaceSizeSpinBox_;
+    QDoubleSpinBox* faceRecognitionPaddingSpinBox_;
     QCheckBox* exportResultsCheck_;
     QComboBox* exportFormatCombo_;
     QLineEdit* exportDirectoryEdit_;
@@ -195,8 +216,19 @@ private:
     QSpinBox* networkPortSpinBox_;
     QComboBox* previewModeCombo_;
     QPushButton* onnxBrowseButton_;
-    QPushButton* engineBrowseButton_;
     QPushButton* labelsBrowseButton_;
+    QPushButton* faceRecognitionApplyButton_;
+    QLineEdit* faceCodeEdit_;
+    QLineEdit* faceNameEdit_;
+    QLineEdit* faceImagePathEdit_;
+    QLineEdit* faceNotesEdit_;
+    QPushButton* faceImageBrowseButton_;
+    QPushButton* faceAddButton_;
+    QPushButton* faceRemoveButton_;
+    QPushButton* faceRefreshButton_;
+    QLabel* faceLibraryStatusLabel_;
+    QLabel* faceRecognitionStatusLabel_;
+    QLabel* faceFeatureModelStatusLabel_;
 
     qint64 displayedPreviewFrameIndex_;
     qint64 latestDetectionFrameIndex_;
@@ -213,9 +245,6 @@ private:
     int controlVideoHeight_;
     double controlVideoFps_;
     qint64 controlDurationMs_;
-    bool controlAudioAvailable_;
-    int controlAudioSampleRate_;
-    int controlAudioChannels_;
 };
 
 #endif // MAINWINDOW_H

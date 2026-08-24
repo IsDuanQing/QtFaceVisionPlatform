@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/DetectionResult.h"
+#include "common/FaceFeature.h"
 
 struct sqlite3;
 
@@ -52,10 +53,52 @@ struct DetectionHistoryRow
     std::string className;
     float confidence = 0.0F;
     BoundingBox box;
+    std::optional<std::int64_t> faceId;
+    std::string faceCode;
+    std::string faceName;
+    std::int64_t faceMatchedAtMs = 0;
+    float faceDistance = 0.0F;
+    float faceSimilarity = 0.0F;
+    float faceThreshold = 0.0F;
+    std::string faceRecognizerName;
 };
 
 using InspectionSessionSummaries = std::vector<InspectionSessionSummary>;
 using DetectionHistoryRows = std::vector<DetectionHistoryRow>;
+
+struct FaceIdentityEntry
+{
+    std::int64_t faceId = 0;
+    std::string faceCode;
+    std::string displayName;
+    std::string referenceImagePath;
+    std::string notes;
+    std::int64_t createdAtMs = 0;
+    std::int64_t updatedAtMs = 0;
+};
+
+using FaceIdentityEntries = std::vector<FaceIdentityEntry>;
+
+struct FaceRecognitionEvent
+{
+    std::int64_t eventId = 0;
+    std::int64_t detectionRecordId = 0;
+    std::int64_t sessionId = 0;
+    std::string sourceId;
+    std::int64_t frameIndex = 0;
+    std::int64_t ptsMs = 0;
+    std::string eventType;
+    std::optional<std::int64_t> faceId;
+    std::string faceCode;
+    std::string faceName;
+    float distance = 0.0F;
+    float similarity = 0.0F;
+    float threshold = 0.0F;
+    std::string recognizerName;
+    std::int64_t createdAtMs = 0;
+};
+
+using FaceRecognitionEvents = std::vector<FaceRecognitionEvent>;
 
 class SQLiteDetectionStorage final
 {
@@ -92,8 +135,26 @@ public:
     DetectionHistoryRows recentHistory(std::size_t maxCount) const;
     DetectionHistoryRows queryHistory(const DetectionHistoryQuery& query) const;
 
+    bool saveFaceIdentity(const FaceIdentityEntry& entry);
+    bool removeFaceIdentity(std::int64_t faceId);
+    FaceIdentityEntries recentFaceIdentities(std::size_t maxCount) const;
+    std::optional<FaceIdentityEntry> faceIdentityByCode(
+        const std::string& faceCode) const;
+    bool replaceFaceFeatures(
+        std::int64_t faceId,
+        const FaceFeatureTemplates& templates);
+    FaceFeatureTemplates allFaceFeatures() const;
+    FaceRecognitionEvents recentFaceRecognitionEvents(
+        std::size_t maxCount) const;
+    bool bindFaceIdentity(std::int64_t recordId, std::int64_t faceId);
+    bool clearFaceIdentity(std::int64_t recordId);
+
 private:
     bool createSchemaLocked();
+    bool ensureColumnLocked(
+        const char* tableName,
+        const char* columnName,
+        const char* alterSql);
     bool executeLocked(const char* sql);
     bool insertFrameLocked(
         std::int64_t sessionId,
@@ -108,7 +169,25 @@ private:
         std::int64_t fallbackFrameIndex,
         std::int64_t fallbackPtsMs,
         const DetectionResult& result,
-        std::int64_t recordedAtMs);
+        std::int64_t recordedAtMs,
+        std::int64_t* recordId);
+    bool insertRecognizedFaceLinkLocked(
+        std::int64_t recordId,
+        const DetectionResult& result);
+    bool insertRecognitionEventLocked(
+        std::int64_t recordId,
+        std::int64_t sessionId,
+        const std::string& fallbackSourceId,
+        std::int64_t fallbackFrameIndex,
+        std::int64_t fallbackPtsMs,
+        const DetectionResult& result,
+        std::int64_t createdAtMs);
+    bool shouldInsertRecognitionEventLocked(
+        std::int64_t sessionId,
+        const std::string& sourceId,
+        std::int64_t faceId,
+        std::int64_t createdAtMs,
+        bool* shouldInsert);
     DetectionResults readResultsLocked(
         const char* sql,
         std::int64_t firstParameter,
@@ -116,6 +195,8 @@ private:
         bool bindSecondParameter) const;
     void setLastErrorLocked(const std::string& context) const;
     static std::int64_t currentTimeMs();
+
+    static constexpr std::int64_t kRecognitionEventCooldownMs = 5000;
 
     sqlite3* database_;
     mutable std::mutex mutex_;

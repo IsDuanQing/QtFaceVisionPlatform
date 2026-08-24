@@ -1,79 +1,41 @@
-# Industrial Vision Platform
+# Face Recognition Platform
 
-基于 C++17 / Qt / FFmpeg / OpenCV DNN / TensorRT 的工业视觉检测平台。
+基于 `C++17 / Qt 6 / FFmpeg / OpenCV DNN / SQLite` 的人脸检测、识别与事件管理平台。
 
-项目面向工业缺陷检测和视频流分析场景，提供视频输入、实时预览、YOLO 推理、检测结果管理、历史查询、结果导出和远程控制协议等基础能力。
+主流程：
 
-## 核心能力
+`摄像头 / RTSP / 视频文件 -> 视频流处理 -> 人脸检测/识别 -> 事件分析 -> 存储 -> 告警 -> 客户端管理`
 
-- 支持本地视频、RTSP 视频流和图片文件夹模拟视频输入。
-- 基于 FFmpeg 完成视频解码、帧转换和播放控制。
-- 基于生产者-消费者模型拆分视频读取、显示和推理链路。
-- 支持 Mock、OpenCV DNN、TensorRT 三种检测后端接口。
-- 支持 YOLO ONNX 模型真实检测闭环。
-- 支持 Detection Preview 模式，保证图像与检测框严格同步。
-- 支持检测结果缓存、SQLite 历史记录查询、JSON Lines / CSV 导出。
-- 支持 TCP 结果发送和检测控制服务协议。
+## 当前功能
 
-## 技术栈
-
-- C++17
-- Qt6 / Qt Widgets
-- FFmpeg
-- OpenCV DNN
-- TensorRT / CUDA
-- SQLite
-- TCP / epoll
-- CMake / qmake
+- 视频输入：支持本地视频文件和 RTSP 视频流。
+- 视频处理：基于 FFmpeg 解码，并通过生产者-消费者队列解耦读取、检测和显示。
+- 人脸检测：基于 OpenCV DNN 加载 YOLO ONNX 模型，输出人脸框、类别和置信度。
+- 检测预览：支持检测帧预览模式，保证画面和检测框同步显示。
+- 历史记录：检测结果写入 SQLite，支持按会话、来源、类别和时间范围查询。
+- 人脸库：支持维护人员编号、姓名、参考图片路径和备注，并可把历史检测记录手动关联到人员身份。
+- 远程控制：提供检测服务控制协议，可用于任务启动、停止、状态查询和远程任务参数配置。
 
 ## 工程结构
 
-```text
-IndustrialVisionPlatform/
-  apps/
-    viewer/        Qt 可视化客户端
+- `apps/viewer`：Qt 客户端界面、视频预览、参数配置、历史记录和人脸库管理。
+- `modules/common`：公共数据结构、运行状态和线程队列。
+- `modules/video`：FFmpeg 视频解码和帧转换。
+- `modules/pipeline`：帧分发和生产者-消费者调度。
+- `modules/playback`：视频打开、播放、暂停、停止和检测预览闭环。
+- `modules/inference`：OpenCV DNN YOLO 人脸检测。
+- `modules/results`：检测结果汇总和统计。
+- `modules/storage`：SQLite 会话、检测记录、人脸库和记录关联存储。
+- `modules/network`：检测结果网络发送。
+- `modules/control`：检测服务端和控制协议。
+- `tests`：模块级 smoke test。
 
-  modules/
-    common/        公共数据结构、线程安全队列
-    video/         视频文件、RTSP、图片序列输入
-    audio/         音频解码与播放
-    pipeline/      帧分发和消费队列
-    playback/      播放、同步、推理调度
-    inference/     YOLO / OpenCV DNN / TensorRT 推理接口与实现
-    results/       检测结果缓存与统计
-    storage/       SQLite 检测记录存储
-    network/       检测结果导出与 TCP 发送
-    control/       检测服务端与远程控制协议
+## 当前模型
 
-  tests/           模块级 smoke tests
-  tools/           开发辅助脚本
-  CMakeLists.txt
-  IndustrialVisionPlatform.pro
-```
+- `models/yolov8-face/face.onnx`
+- `models/yolov8-face/labels.txt`
 
-## 本地资源
+## 说明
 
-模型、TensorRT engine、测试视频、图片数据集、构建产物和本地学习文档不提交到 GitHub。
-
-默认忽略：
-
-- `models/**/*.onnx`
-- `models/**/*.engine`
-- `videos/`
-- `build-*/`
-- `docs/`
-
-运行真实 YOLO 检测时，需要在本地准备对应的 ONNX / labels 文件，并在 Qt 界面中配置模型路径。
-
-## 当前状态
-
-当前版本重点验证桌面端检测闭环：
-
-- Qt6 + UCRT64 可视化 demo
-- FFmpeg 视频播放
-- 图片序列输入
-- OpenCV DNN 加载 YOLO ONNX
-- 检测框同步显示
-- 检测结果存储、查询、导出和远程控制
-
-TensorRT 后端接口已经预留，后续可继续完善真实 GPU 推理部署。
+- 当前项目已聚焦到人脸检测/识别业务链路，旧的音频、图片序列、Mock 推理、TensorRT 演示和旧 `src` 目录已移除。
+- 当前“人脸库”阶段已经完成身份信息管理和检测记录手动关联；真正的特征提取、相似度匹配和自动识别是下一阶段工作。

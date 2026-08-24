@@ -4,6 +4,8 @@ add_executable(IndustrialVisionViewer
     MainWindow.h
     DetectionHistoryTableModel.cpp
     DetectionHistoryTableModel.h
+    FaceLibraryTableModel.cpp
+    FaceLibraryTableModel.h
     ViewerSettingsStore.cpp
     ViewerSettingsStore.h
     VideoDisplayWidget.cpp
@@ -15,6 +17,7 @@ target_link_libraries(IndustrialVisionViewer
         ${IVP_QT_WIDGETS}
         ivp_results
         ivp_storage
+        ivp_recognition
         ivp_playback
         ivp_network
         ivp_control
