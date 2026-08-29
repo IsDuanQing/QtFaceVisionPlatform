@@ -1,4 +1,4 @@
-add_executable(IndustrialVisionViewer
+add_executable(QtFaceVisionPlatform
     main.cpp
     MainWindow.cpp
     MainWindow.h
@@ -14,7 +14,7 @@ add_executable(IndustrialVisionViewer
     VideoDisplayWidget.h
 )
 
-target_link_libraries(IndustrialVisionViewer
+target_link_libraries(QtFaceVisionPlatform
     PRIVATE
         ${IVP_QT_WIDGETS}
         ivp_results

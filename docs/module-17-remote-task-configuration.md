@@ -61,8 +61,8 @@
   "input_height": 640,
   "class_count": 1,
   "max_detections": 300,
-  "onnx_path": "D:/IndustrialVisionPlatform/models/yolov8-face/face.onnx",
-  "labels_path": "D:/IndustrialVisionPlatform/models/yolov8-face/labels.txt"
+  "onnx_path": "D:/QtFaceVisionPlatform/models/yolov8-face/face.onnx",
+  "labels_path": "D:/QtFaceVisionPlatform/models/yolov8-face/labels.txt"
 }
 ```
 
@@ -146,7 +146,7 @@ MainWindow::applyRemoteTaskConfig()
 发送一行：
 
 ```json
-{"type":"configure_task","request_id":"req-local","task_id":"face-local","source_type":"rtsp","source_url":"rtsp://127.0.0.1:8554/test","auto_start":true,"confidence_threshold":0.5,"nms_threshold":0.45,"input_width":640,"input_height":640,"class_count":1,"max_detections":300,"onnx_path":"D:/IndustrialVisionPlatform/models/yolov8-face/face.onnx","labels_path":"D:/IndustrialVisionPlatform/models/yolov8-face/labels.txt","production_line_id":"gate-a","batch_id":"shift-001"}
+{"type":"configure_task","request_id":"req-local","task_id":"face-local","source_type":"rtsp","source_url":"rtsp://127.0.0.1:8554/test","auto_start":true,"confidence_threshold":0.5,"nms_threshold":0.45,"input_width":640,"input_height":640,"class_count":1,"max_detections":300,"onnx_path":"D:/QtFaceVisionPlatform/models/yolov8-face/face.onnx","labels_path":"D:/QtFaceVisionPlatform/models/yolov8-face/labels.txt","production_line_id":"gate-a","batch_id":"shift-001"}
 ```
 
 然后再发送：

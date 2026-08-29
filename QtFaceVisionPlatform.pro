@@ -2,6 +2,7 @@ QT += widgets gui core multimedia network
 
 CONFIG += c++17 thread
 CONFIG -= app_bundle
+TARGET = QtFaceVisionPlatform
 
 # The following define makes your compiler emit warnings if you use
 # any Qt feature that has been marked deprecated (the exact warnings

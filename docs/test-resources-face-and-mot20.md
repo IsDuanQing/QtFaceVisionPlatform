@@ -32,7 +32,7 @@ videos/mot20-02/
 4. 点击顶部 `Open`，选择：
 
 ```text
-D:/IndustrialVisionPlatform/videos/face-detection/face-test.mp4
+D:/QtFaceVisionPlatform/videos/face-detection/face-test.mp4
 ```
 
 5. 切换到 Detection Preview。
@@ -41,8 +41,8 @@ D:/IndustrialVisionPlatform/videos/face-detection/face-test.mp4
 `Face` 预设会自动设置：
 
 - `OpenCV DNN`
-- `ONNX: D:/IndustrialVisionPlatform/models/yolov8-face/face.onnx`
-- `Labels: D:/IndustrialVisionPlatform/models/yolov8-face/labels.txt`
+- `ONNX: D:/QtFaceVisionPlatform/models/yolov8-face/face.onnx`
+- `Labels: D:/QtFaceVisionPlatform/models/yolov8-face/labels.txt`
 - `Input: 640 x 640`
 - `Classes: 1`
 - `Conf: 0.25`
@@ -81,14 +81,14 @@ D:/IndustrialVisionPlatform/videos/face-detection/face-test.mp4
 转换 MP4 示例：
 
 ```powershell
-ffmpeg -framerate 25 -i D:/IndustrialVisionPlatform/videos/mot20-02/img1/%06d.jpg ^
-  -c:v libx264 -pix_fmt yuv420p D:/IndustrialVisionPlatform/videos/mot20-02/mot20-02.mp4
+ffmpeg -framerate 25 -i D:/QtFaceVisionPlatform/videos/mot20-02/img1/%06d.jpg ^
+  -c:v libx264 -pix_fmt yuv420p D:/QtFaceVisionPlatform/videos/mot20-02/mot20-02.mp4
 ```
 
 然后在 Qt 客户端中点击 `Open` 打开：
 
 ```text
-D:/IndustrialVisionPlatform/videos/mot20-02/mot20-02.mp4
+D:/QtFaceVisionPlatform/videos/mot20-02/mot20-02.mp4
 ```
 
 注意：MOT20 适合压测检测框数量、队列稳定性和 UI 刷新，不适合验证人脸识别准确率。

@@ -91,8 +91,8 @@ Qt Creator 中可以在 qmake 参数里填写同样的内容。
 5. 确认参数：
 
 ```text
-ONNX:   D:/IndustrialVisionPlatform/models/yolov8-face/face.onnx
-Labels: D:/IndustrialVisionPlatform/models/yolov8-face/labels.txt
+ONNX:   D:/QtFaceVisionPlatform/models/yolov8-face/face.onnx
+Labels: D:/QtFaceVisionPlatform/models/yolov8-face/labels.txt
 Input W: 640
 Input H: 640
 Classes: 1
@@ -111,10 +111,10 @@ Classes: 1
   "type": "configure_task",
   "task_id": "task-face-opencv-001",
   "source_type": "file",
-  "source_url": "D:/IndustrialVisionPlatform/testdata/face-test.mp4",
+  "source_url": "D:/QtFaceVisionPlatform/testdata/face-test.mp4",
   "auto_start": true,
-  "onnx_path": "D:/IndustrialVisionPlatform/models/yolov8-face/face.onnx",
-  "labels_path": "D:/IndustrialVisionPlatform/models/yolov8-face/labels.txt",
+  "onnx_path": "D:/QtFaceVisionPlatform/models/yolov8-face/face.onnx",
+  "labels_path": "D:/QtFaceVisionPlatform/models/yolov8-face/labels.txt",
   "input_width": 640,
   "input_height": 640,
   "class_count": 1,
