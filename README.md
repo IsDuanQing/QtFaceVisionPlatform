@@ -51,31 +51,39 @@
 
 文件：`docs/images/qt-ui/main-window.png`
 
-<!-- ![Qt 主界面](docs/images/qt-ui/main-window.png) -->
+![Qt 主界面](docs/images/qt-ui/main-window.png)
 
 ### Detection Preview
 
 文件：`docs/images/qt-ui/detection-preview.png`
 
-<!-- ![Detection Preview](docs/images/qt-ui/detection-preview.png) -->
+> 待补充截图：将图片保存为 `docs/images/qt-ui/detection-preview.png` 后，取消下面这行的注释。
+>
+> `![Detection Preview](docs/images/qt-ui/detection-preview.png)`
 
 ### History
 
 文件：`docs/images/qt-ui/history-query.png`
 
-<!-- ![History 历史记录](docs/images/qt-ui/history-query.png) -->
+> 待补充截图：将图片保存为 `docs/images/qt-ui/history-query.png` 后，取消下面这行的注释。
+>
+> `![History 历史记录](docs/images/qt-ui/history-query.png)`
 
 ### Faces
 
 文件：`docs/images/qt-ui/faces-library.png`
 
-<!-- ![Faces 人脸库](docs/images/qt-ui/faces-library.png) -->
+> 待补充截图：将图片保存为 `docs/images/qt-ui/faces-library.png` 后，取消下面这行的注释。
+>
+> `![Faces 人脸库](docs/images/qt-ui/faces-library.png)`
 
 ### Recognition 状态
 
 文件：`docs/images/qt-ui/recognition-ready.png`
 
-<!-- ![Recognition 状态](docs/images/qt-ui/recognition-ready.png) -->
+> 待补充截图：将图片保存为 `docs/images/qt-ui/recognition-ready.png` 后，取消下面这行的注释。
+>
+> `![Recognition 状态](docs/images/qt-ui/recognition-ready.png)`
 
 ## 模型文件
 
