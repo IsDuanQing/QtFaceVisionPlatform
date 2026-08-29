@@ -2,6 +2,7 @@
 
 #include "DetectionHistoryTableModel.h"
 #include "FaceLibraryTableModel.h"
+#include "FaceRecognitionEventTableModel.h"
 #include "inference/YoloOpenCVDnnDetector.h"
 
 #include <QAbstractScrollArea>
@@ -16,6 +17,7 @@
 #include <QDateTimeEdit>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QDialog>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFile>
@@ -40,6 +42,7 @@
 #include <QStringList>
 #include <QSizePolicy>
 #include <QTableView>
+#include <QTemporaryDir>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -215,6 +218,38 @@ bool sameFaceRecognitionConfig(
             == right.referenceDetectorSignature;
 }
 
+bool sameDetectorConfig(
+    const ivp::DetectorConfig& left,
+    const ivp::DetectorConfig& right)
+{
+    return left.backend == right.backend
+        && std::fabs(left.confidenceThreshold - right.confidenceThreshold) < 0.0001F
+        && std::fabs(left.nmsThreshold - right.nmsThreshold) < 0.0001F
+        && left.detectEveryNFrames == right.detectEveryNFrames
+        && left.inputWidth == right.inputWidth
+        && left.inputHeight == right.inputHeight
+        && left.classCount == right.classCount
+        && left.maxDetections == right.maxDetections
+        && left.onnxPath == right.onnxPath
+        && left.labelsPath == right.labelsPath;
+}
+
+bool sameFaceTrackerConfig(
+    const ivp::FaceTrackerConfig& left,
+    const ivp::FaceTrackerConfig& right)
+{
+    return std::fabs(
+               left.minIntersectionOverUnion
+               - right.minIntersectionOverUnion)
+            < 0.0001F
+        && std::fabs(
+               left.maxCenterDistanceRatio
+               - right.maxCenterDistanceRatio)
+            < 0.0001F
+        && left.maxMissedUpdates == right.maxMissedUpdates
+        && left.maxLostDurationMs == right.maxLostDurationMs;
+}
+
 QStringList candidateProjectRoots()
 {
     QStringList bases;
@@ -292,13 +327,64 @@ QString sanitizePathComponent(const QString& text, const QString& fallback)
     return result;
 }
 
-QString storeFaceReferenceImage(
-    const QString& sourcePath,
-    const QString& faceCode,
-    QString* relativePath)
+QStringList referenceImageFilters()
 {
-    const QFileInfo sourceInfo(sourcePath);
-    if (!sourceInfo.exists() || !sourceInfo.isFile())
+    return {
+        QStringLiteral("*.png"),
+        QStringLiteral("*.jpg"),
+        QStringLiteral("*.jpeg"),
+        QStringLiteral("*.bmp"),
+        QStringLiteral("*.webp"),
+        QStringLiteral("*.tif"),
+        QStringLiteral("*.tiff")};
+}
+
+QStringList collectReferenceImagePaths(const QStringList& sourcePaths)
+{
+    const QStringList imageFilters = referenceImageFilters();
+    QStringList imagePaths;
+
+    for (const QString& sourcePath : sourcePaths)
+    {
+        const QFileInfo sourceInfo(sourcePath);
+        if (sourceInfo.isFile())
+        {
+            const QString suffix = sourceInfo.suffix().trimmed().toLower();
+            if (imageFilters.contains(QStringLiteral("*.%1").arg(suffix)))
+            {
+                imagePaths.append(sourceInfo.absoluteFilePath());
+            }
+            continue;
+        }
+
+        if (!sourceInfo.isDir())
+        {
+            continue;
+        }
+
+        const QDir sourceDirectory(sourceInfo.absoluteFilePath());
+        const QFileInfoList entries = sourceDirectory.entryInfoList(
+            imageFilters,
+            QDir::Files | QDir::Readable,
+            QDir::Name);
+        for (const QFileInfo& entry : entries)
+        {
+            imagePaths.append(entry.absoluteFilePath());
+        }
+    }
+
+    imagePaths.removeDuplicates();
+    return imagePaths;
+}
+
+QString storeFaceReferenceImages(
+    const QStringList& sourcePaths,
+    const QString& faceCode,
+    QString* relativePath,
+    int* storedImageCount)
+{
+    const QStringList imagePaths = collectReferenceImagePaths(sourcePaths);
+    if (imagePaths.isEmpty())
     {
         return {};
     }
@@ -313,23 +399,50 @@ QString storeFaceReferenceImage(
         return {};
     }
 
-    QString extension = sourceInfo.suffix().trimmed().toLower();
-    if (extension.isEmpty())
+    // Stage the files first so re-importing images from the existing project
+    // directory cannot delete the source files during cleanup.
+    QTemporaryDir stagingDirectory;
+    if (!stagingDirectory.isValid())
     {
-        extension = QStringLiteral("png");
+        return {};
     }
 
-    const QString targetPath = QDir(faceFolderPath).filePath(
-        QStringLiteral("reference.%1").arg(extension));
-    const QString absoluteSourcePath = sourceInfo.absoluteFilePath();
-    if (QFileInfo(absoluteSourcePath).absoluteFilePath()
-        != QFileInfo(targetPath).absoluteFilePath())
+    QStringList stagedPaths;
+    stagedPaths.reserve(imagePaths.size());
+    for (int index = 0; index < imagePaths.size(); ++index)
     {
-        if (QFile::exists(targetPath) && !QFile::remove(targetPath))
+        const QFileInfo sourceInfo(imagePaths.at(index));
+        const QString stagingPath = QDir(stagingDirectory.path()).filePath(
+            QStringLiteral("source_%1.%2")
+                .arg(index, 4, 10, QLatin1Char('0'))
+                .arg(sourceInfo.suffix().trimmed().toLower()));
+        if (!QFile::copy(sourceInfo.absoluteFilePath(), stagingPath))
         {
             return {};
         }
-        if (!QFile::copy(absoluteSourcePath, targetPath))
+        stagedPaths.append(stagingPath);
+    }
+
+    const QStringList imageFilters = referenceImageFilters();
+    const QFileInfoList existingImages = QDir(faceFolderPath).entryInfoList(
+        imageFilters,
+        QDir::Files | QDir::Readable);
+    for (const QFileInfo& existingImage : existingImages)
+    {
+        if (!QFile::remove(existingImage.absoluteFilePath()))
+        {
+            return {};
+        }
+    }
+
+    for (int index = 0; index < stagedPaths.size(); ++index)
+    {
+        const QFileInfo stagedInfo(stagedPaths.at(index));
+        const QString targetPath = QDir(faceFolderPath).filePath(
+            QStringLiteral("reference_%1.%2")
+                .arg(index + 1, 3, 10, QLatin1Char('0'))
+                .arg(stagedInfo.suffix().trimmed().toLower()));
+        if (!QFile::copy(stagedInfo.absoluteFilePath(), targetPath))
         {
             return {};
         }
@@ -337,10 +450,14 @@ QString storeFaceReferenceImage(
 
     if (relativePath != nullptr)
     {
-        *relativePath = rootDir.relativeFilePath(targetPath);
+        *relativePath = rootDir.relativeFilePath(faceFolderPath);
+    }
+    if (storedImageCount != nullptr)
+    {
+        *storedImageCount = stagedPaths.size();
     }
 
-    return targetPath;
+    return faceFolderPath;
 }
 
 } // namespace
@@ -356,6 +473,8 @@ MainWindow::MainWindow(QWidget* parent)
       settingsStore_(),
       defaultViewerSettings_(),
       storageSessionId_(0),
+      historyLiveRefreshTimer_(),
+      historyRefreshPending_(false),
       videoWidget_(nullptr),
       titleLabel_(nullptr),
       fileLabel_(nullptr),
@@ -368,6 +487,7 @@ MainWindow::MainWindow(QWidget* parent)
       storageValueLabel_(nullptr),
       controlStatusLabel_(nullptr),
       historyStatusLabel_(nullptr),
+      recognitionEventStatusLabel_(nullptr),
       deliveryStatusLabel_(nullptr),
       runtimeSummaryValueLabel_(nullptr),
       displayedFrameValueLabel_(nullptr),
@@ -380,6 +500,10 @@ MainWindow::MainWindow(QWidget* parent)
       stopButton_(nullptr),
       historyRefreshButton_(nullptr),
       historyClearButton_(nullptr),
+      historyDeleteButton_(nullptr),
+      recognitionEventRefreshButton_(nullptr),
+      recognitionEventClearButton_(nullptr),
+      recognitionEventDeleteButton_(nullptr),
       restoreDefaultsButton_(nullptr),
       applyDetectorButton_(nullptr),
       facePresetButton_(nullptr),
@@ -387,8 +511,10 @@ MainWindow::MainWindow(QWidget* parent)
       exportBrowseButton_(nullptr),
       historyModel_(nullptr),
       faceLibraryModel_(nullptr),
+      recognitionEventModel_(nullptr),
       historyTableView_(nullptr),
       faceLibraryTableView_(nullptr),
+      recognitionEventTableView_(nullptr),
       historySessionCombo_(nullptr),
       historySourceEdit_(nullptr),
       historyClassEdit_(nullptr),
@@ -400,6 +526,11 @@ MainWindow::MainWindow(QWidget* parent)
       historyFaceCombo_(nullptr),
       historyFaceBindButton_(nullptr),
       historyFaceClearButton_(nullptr),
+      recognitionEventSessionCombo_(nullptr),
+      recognitionEventTypeCombo_(nullptr),
+      recognitionEventSourceEdit_(nullptr),
+      recognitionEventFaceEdit_(nullptr),
+      recognitionEventLimitSpinBox_(nullptr),
       confidenceSpinBox_(nullptr),
       nmsSpinBox_(nullptr),
       maxDetectionsSpinBox_(nullptr),
@@ -407,6 +538,10 @@ MainWindow::MainWindow(QWidget* parent)
       inputHeightSpinBox_(nullptr),
       classCountSpinBox_(nullptr),
       detectEverySpinBox_(nullptr),
+      faceTrackerIouSpinBox_(nullptr),
+      faceTrackerCenterDistanceSpinBox_(nullptr),
+      faceTrackerMissedUpdatesSpinBox_(nullptr),
+      faceTrackerLostDurationSpinBox_(nullptr),
       onnxPathEdit_(nullptr),
       labelsPathEdit_(nullptr),
       faceFeatureModelPathEdit_(nullptr),
@@ -424,9 +559,10 @@ MainWindow::MainWindow(QWidget* parent)
       previewModeCombo_(nullptr),
       onnxBrowseButton_(nullptr),
       labelsBrowseButton_(nullptr),
-      faceCodeEdit_(nullptr),
+    faceCodeEdit_(nullptr),
       faceNameEdit_(nullptr),
       faceImagePathEdit_(nullptr),
+      faceSelectedReferencePaths_(),
       faceNotesEdit_(nullptr),
       faceImageBrowseButton_(nullptr),
       faceRecognitionApplyButton_(nullptr),
@@ -436,6 +572,7 @@ MainWindow::MainWindow(QWidget* parent)
       faceLibraryStatusLabel_(nullptr),
       faceRecognitionStatusLabel_(nullptr),
       faceFeatureModelStatusLabel_(nullptr),
+      activeConfigurationStatusLabel_(nullptr),
       displayedPreviewFrameIndex_(-1),
       latestDetectionFrameIndex_(-1),
       inferenceFpsFrameCount_(0),
@@ -453,6 +590,7 @@ MainWindow::MainWindow(QWidget* parent)
 {
     faceReferenceRecognizer_.initialize(player_.faceRecognitionConfig());
     defaultViewerSettings_.detectorConfig = player_.detectorConfig();
+    defaultViewerSettings_.faceTrackerConfig = player_.faceTrackerConfig();
     defaultViewerSettings_.faceRecognitionConfig = player_.faceRecognitionConfig();
     const QString documentsDirectory =
         QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
@@ -468,6 +606,21 @@ MainWindow::MainWindow(QWidget* parent)
     restoreViewerSettings();
     applyStyle();
     connectSignals();
+    historyLiveRefreshTimer_.setInterval(500);
+    historyLiveRefreshTimer_.setTimerType(Qt::CoarseTimer);
+    connect(
+        &historyLiveRefreshTimer_,
+        &QTimer::timeout,
+        this,
+        [this]() {
+            if (!historyRefreshPending_)
+            {
+                return;
+            }
+
+            historyRefreshPending_ = false;
+            refreshHistory();
+        });
     initializeStorage();
     initializeControlService();
     updatePlayerState(false, false);
@@ -476,6 +629,7 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
+    player_.stop();
     saveViewerSettings();
     finishStorageSession();
     controlServer_.stop();
@@ -495,12 +649,14 @@ void MainWindow::openVideo()
         return;
     }
 
+    player_.stop();
     finishStorageSession();
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading video..."));
     resetDetectionSummary();
     resetPreviewDebug();
     applyCurrentDetectorConfig();
+    applyCurrentFaceTrackerConfig();
     applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
 
@@ -539,12 +695,14 @@ void MainWindow::openRtspStream()
         return;
     }
 
+    player_.stop();
     finishStorageSession();
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Connecting to RTSP stream..."));
     resetDetectionSummary();
     resetPreviewDebug();
     applyCurrentDetectorConfig();
+    applyCurrentFaceTrackerConfig();
     applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
 
@@ -633,18 +791,42 @@ void MainWindow::displayDetections(
     const QString& sourceId)
 {
     resultManager_.addFrameResults(sourceId.toStdString(), frameIndex, ptsMs, results);
-    if (storageSessionId_ > 0
-        && !detectionStorage_.saveFrameResults(
-            storageSessionId_,
-            sourceId.toStdString(),
-            frameIndex,
-            ptsMs,
-            results))
+    if (storageSessionId_ > 0)
     {
-        qWarning() << "Could not persist detection results:"
-                   << QString::fromStdString(detectionStorage_.lastError());
-        finishStorageSession();
-        storageValueLabel_->setText(tr("Error"));
+        if (!detectionStorage_.saveFrameResults(
+                storageSessionId_,
+                sourceId.toStdString(),
+                frameIndex,
+                ptsMs,
+                results))
+        {
+            qWarning() << "Could not persist detection results:"
+                       << QString::fromStdString(detectionStorage_.lastError());
+            finishStorageSession();
+            storageValueLabel_->setText(tr("Error"));
+        }
+        else if (!results.empty())
+        {
+            historyRefreshPending_ = true;
+        }
+    }
+
+    if (storageSessionId_ > 0)
+    {
+        const ivp::FaceTrackSnapshots endedTracks =
+            player_.takeEndedFaceTracks();
+        if (!endedTracks.empty()
+            && !detectionStorage_.saveFaceTrackSnapshots(
+                storageSessionId_,
+                endedTracks))
+        {
+            qWarning() << "Could not persist ended face tracks:"
+                       << QString::fromStdString(detectionStorage_.lastError());
+        }
+        else if (!endedTracks.empty())
+        {
+            historyRefreshPending_ = true;
+        }
     }
 
     // Detection is produced asynchronously, so the overlay must be bound to
@@ -722,6 +904,13 @@ void MainWindow::updateRuntimeStatus(const ivp::RuntimeStatus& status)
         setLabelTextIfChanged(runtimeSummaryValueLabel_, formatRuntimeSummary(status));
     }
 
+    if (storageSessionId_ > 0
+        && (status.state == ivp::RuntimeState::Completed
+            || status.state == ivp::RuntimeState::Error))
+    {
+        finishStorageSession();
+    }
+
     syncControlStatus(false);
 }
 
@@ -779,6 +968,49 @@ void MainWindow::refreshHistory()
         historyTableView_->resizeColumnsToContents();
         historyTableView_->horizontalHeader()->setStretchLastSection(true);
     }
+
+    refreshRecognitionEvents();
+}
+
+void MainWindow::refreshRecognitionEvents()
+{
+    if (recognitionEventModel_ == nullptr
+        || recognitionEventStatusLabel_ == nullptr)
+    {
+        return;
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        recognitionEventModel_->clear();
+        recognitionEventStatusLabel_->setText(tr("Storage not ready"));
+        return;
+    }
+
+    reloadRecognitionEventSessions();
+    const ivp::FaceRecognitionEventQuery query =
+        collectRecognitionEventQuery();
+    ivp::FaceRecognitionEvents events =
+        detectionStorage_.queryFaceRecognitionEvents(query);
+    const std::string error = detectionStorage_.lastError();
+    if (!error.empty())
+    {
+        recognitionEventModel_->clear();
+        recognitionEventStatusLabel_->setText(tr("Query error"));
+        qWarning() << "Could not query recognition events:"
+                   << QString::fromStdString(error);
+        return;
+    }
+
+    const int count = static_cast<int>(events.size());
+    recognitionEventModel_->setEvents(std::move(events));
+    recognitionEventStatusLabel_->setText(
+        QStringLiteral("%1 events").arg(count));
+    if (recognitionEventTableView_ != nullptr)
+    {
+        recognitionEventTableView_->resizeColumnsToContents();
+        recognitionEventTableView_->horizontalHeader()->setStretchLastSection(true);
+    }
 }
 
 void MainWindow::clearHistoryFilters()
@@ -822,6 +1054,160 @@ void MainWindow::clearHistoryFilters()
     }
 
     refreshHistory();
+}
+
+void MainWindow::clearRecognitionEventFilters()
+{
+    if (recognitionEventSessionCombo_ != nullptr)
+    {
+        const QSignalBlocker blocker(recognitionEventSessionCombo_);
+        recognitionEventSessionCombo_->setCurrentIndex(0);
+    }
+    if (recognitionEventTypeCombo_ != nullptr)
+    {
+        const QSignalBlocker blocker(recognitionEventTypeCombo_);
+        recognitionEventTypeCombo_->setCurrentIndex(0);
+    }
+    if (recognitionEventSourceEdit_ != nullptr)
+    {
+        recognitionEventSourceEdit_->clear();
+    }
+    if (recognitionEventFaceEdit_ != nullptr)
+    {
+        recognitionEventFaceEdit_->clear();
+    }
+    if (recognitionEventLimitSpinBox_ != nullptr)
+    {
+        recognitionEventLimitSpinBox_->setValue(200);
+    }
+
+    refreshRecognitionEvents();
+}
+
+void MainWindow::deleteHistoryRecords()
+{
+    if (storageSessionId_ > 0)
+    {
+        QMessageBox::information(
+            this,
+            tr("History"),
+            tr("Stop the current playback before deleting history records."));
+        return;
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        QMessageBox::warning(
+            this,
+            tr("History"),
+            tr("Storage is not ready."));
+        return;
+    }
+
+    const ivp::DetectionHistoryQuery query = collectHistoryQuery();
+    const bool hasFilter =
+        query.sessionId.has_value()
+        || (query.sourceLike.has_value() && !query.sourceLike->empty())
+        || (query.classLike.has_value() && !query.classLike->empty())
+        || query.recordedAfterMs.has_value()
+        || query.recordedBeforeMs.has_value();
+    const QString scope = hasFilter
+        ? tr("all history records matching the current filters")
+        : tr("all history records");
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        tr("Delete History"),
+        tr("Delete %1?\n\nThis also removes linked face associations "
+           "and recognition events. The Faces library will not be changed.")
+            .arg(scope),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    std::size_t deletedCount = 0;
+    if (!detectionStorage_.deleteHistoryRecords(query, &deletedCount))
+    {
+        QMessageBox::warning(
+            this,
+            tr("History"),
+            tr("Could not delete history records: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    refreshHistory();
+    if (historyStatusLabel_ != nullptr)
+    {
+        historyStatusLabel_->setText(
+            tr("Deleted %1 records").arg(
+                static_cast<qulonglong>(deletedCount)));
+    }
+}
+
+void MainWindow::deleteRecognitionEvents()
+{
+    if (storageSessionId_ > 0)
+    {
+        QMessageBox::information(
+            this,
+            tr("Events"),
+            tr("Stop the current playback before deleting recognition events."));
+        return;
+    }
+
+    if (!detectionStorage_.isOpen())
+    {
+        QMessageBox::warning(
+            this,
+            tr("Events"),
+            tr("Storage is not ready."));
+        return;
+    }
+
+    const ivp::FaceRecognitionEventQuery query =
+        collectRecognitionEventQuery();
+    const bool hasFilter =
+        query.sessionId.has_value()
+        || (query.sourceLike.has_value() && !query.sourceLike->empty())
+        || (query.eventType.has_value() && !query.eventType->empty())
+        || (query.faceLike.has_value() && !query.faceLike->empty());
+    const QString scope = hasFilter
+        ? tr("all recognition events matching the current filters")
+        : tr("all recognition events");
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        tr("Delete Events"),
+        tr("Delete %1?\n\nDetection history and the Faces library "
+           "will not be changed.")
+            .arg(scope),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    std::size_t deletedCount = 0;
+    if (!detectionStorage_.deleteRecognitionEvents(query, &deletedCount))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Events"),
+            tr("Could not delete recognition events: %1")
+                .arg(QString::fromStdString(detectionStorage_.lastError())));
+        return;
+    }
+
+    refreshRecognitionEvents();
+    if (recognitionEventStatusLabel_ != nullptr)
+    {
+        recognitionEventStatusLabel_->setText(
+            tr("Deleted %1 events").arg(
+                static_cast<qulonglong>(deletedCount)));
+    }
 }
 
 void MainWindow::buildUi()
@@ -941,6 +1327,18 @@ void MainWindow::buildUi()
     bottomTabs->addTab(createSettingsPanel(), tr("Parameters"));
     bottomTabs->addTab(createHistoryPanel(), tr("History"));
     bottomTabs->addTab(createFaceLibraryPanel(), tr("Faces"));
+    const int recognitionEventsTabIndex =
+        bottomTabs->addTab(createRecognitionEventsPanel(), tr("Events"));
+    connect(
+        bottomTabs,
+        &QTabWidget::currentChanged,
+        this,
+        [this, recognitionEventsTabIndex](int index) {
+            if (index == recognitionEventsTabIndex)
+            {
+                refreshRecognitionEvents();
+            }
+        });
     bottomTabs->tabBar()->setElideMode(Qt::ElideRight);
 
     QSplitter* bodySplitter = new QSplitter(Qt::Horizontal);
@@ -1012,6 +1410,35 @@ QWidget* MainWindow::createSettingsPanel()
     detectEverySpinBox_ = new QSpinBox(panel);
     detectEverySpinBox_->setRange(1, 1000);
     styleNumericSpin(detectEverySpinBox_);
+
+    faceTrackerIouSpinBox_ = new QDoubleSpinBox(panel);
+    faceTrackerIouSpinBox_->setRange(0.0, 1.0);
+    faceTrackerIouSpinBox_->setDecimals(2);
+    faceTrackerIouSpinBox_->setSingleStep(0.05);
+    faceTrackerIouSpinBox_->setToolTip(
+        tr("Minimum box overlap used when associating a detection with a track."));
+    styleNumericSpin(faceTrackerIouSpinBox_);
+
+    faceTrackerCenterDistanceSpinBox_ = new QDoubleSpinBox(panel);
+    faceTrackerCenterDistanceSpinBox_->setRange(0.0, 3.0);
+    faceTrackerCenterDistanceSpinBox_->setDecimals(2);
+    faceTrackerCenterDistanceSpinBox_->setSingleStep(0.05);
+    faceTrackerCenterDistanceSpinBox_->setToolTip(
+        tr("Maximum normalized center distance accepted for track association."));
+    styleNumericSpin(faceTrackerCenterDistanceSpinBox_);
+
+    faceTrackerMissedUpdatesSpinBox_ = new QSpinBox(panel);
+    faceTrackerMissedUpdatesSpinBox_->setRange(0, 1000);
+    faceTrackerMissedUpdatesSpinBox_->setToolTip(
+        tr("How many detector updates a track may miss before it expires."));
+    styleNumericSpin(faceTrackerMissedUpdatesSpinBox_);
+
+    faceTrackerLostDurationSpinBox_ = new QSpinBox(panel);
+    faceTrackerLostDurationSpinBox_->setRange(0, 120000);
+    faceTrackerLostDurationSpinBox_->setSingleStep(100);
+    faceTrackerLostDurationSpinBox_->setToolTip(
+        tr("Maximum time without a matching detection before a track expires; zero disables this limit."));
+    styleNumericSpin(faceTrackerLostDurationSpinBox_);
 
     onnxPathEdit_ = new QLineEdit(panel);
     labelsPathEdit_ = new QLineEdit(panel);
@@ -1108,6 +1535,16 @@ QWidget* MainWindow::createSettingsPanel()
         92);
     deliveryStatusLabel_ = createMetricValue(tr("Idle"));
     controlStatusLabel_ = createMetricValue(tr("Control service idle"));
+    activeConfigurationStatusLabel_ = new QLabel(panel);
+    activeConfigurationStatusLabel_->setObjectName(
+        QStringLiteral("activeConfigurationStatusLabel"));
+    activeConfigurationStatusLabel_->setWordWrap(true);
+    activeConfigurationStatusLabel_->setTextFormat(Qt::PlainText);
+    activeConfigurationStatusLabel_->setSizePolicy(
+        QSizePolicy::Expanding,
+        QSizePolicy::Preferred);
+    activeConfigurationStatusLabel_->setText(
+        tr("Loading runtime configuration..."));
 
     QVBoxLayout* panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(18, 14, 18, 14);
@@ -1179,6 +1616,27 @@ QWidget* MainWindow::createSettingsPanel()
     recognitionActionsLayout->addStretch();
     recognitionActionsLayout->addWidget(faceRecognitionApplyButton_);
     panelLayout->addLayout(recognitionActionsLayout);
+
+    panelLayout->addWidget(createSectionTitle(tr("Face Tracking")));
+
+    QGridLayout* trackingGrid = new QGridLayout();
+    trackingGrid->setContentsMargins(0, 0, 0, 0);
+    trackingGrid->setHorizontalSpacing(10);
+    trackingGrid->setVerticalSpacing(8);
+    trackingGrid->addWidget(createMetricLabel(tr("Min IoU")), 0, 0);
+    trackingGrid->addWidget(faceTrackerIouSpinBox_, 0, 1);
+    trackingGrid->addWidget(createMetricLabel(tr("Max Center")), 0, 2);
+    trackingGrid->addWidget(faceTrackerCenterDistanceSpinBox_, 0, 3);
+    trackingGrid->addWidget(createMetricLabel(tr("Max Misses")), 1, 0);
+    trackingGrid->addWidget(faceTrackerMissedUpdatesSpinBox_, 1, 1);
+    trackingGrid->addWidget(createMetricLabel(tr("Lost ms")), 1, 2);
+    trackingGrid->addWidget(faceTrackerLostDurationSpinBox_, 1, 3);
+    trackingGrid->setColumnStretch(1, 1);
+    trackingGrid->setColumnStretch(3, 1);
+    panelLayout->addLayout(trackingGrid);
+
+    panelLayout->addWidget(createSectionTitle(tr("Active Configuration")));
+    panelLayout->addWidget(activeConfigurationStatusLabel_);
 
     panelLayout->addWidget(createSectionTitle(tr("Result Output")));
 
@@ -1326,7 +1784,9 @@ QWidget* MainWindow::createHistoryPanel()
     historyEndEdit_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     installWheelBlocker(historyEndEdit_);
     historyRefreshButton_ = new QPushButton(tr("Refresh"), panel);
-    historyClearButton_ = new QPushButton(tr("Clear"), panel);
+    historyClearButton_ = new QPushButton(tr("Reset Filters"), panel);
+    historyDeleteButton_ = new QPushButton(tr("Delete Records"), panel);
+    historyDeleteButton_->setObjectName(QStringLiteral("dangerButton"));
     styleActionButton(
         historyRefreshButton_,
         qApp->style()->standardIcon(QStyle::SP_BrowserReload),
@@ -1335,8 +1795,13 @@ QWidget* MainWindow::createHistoryPanel()
     styleActionButton(
         historyClearButton_,
         qApp->style()->standardIcon(QStyle::SP_DialogResetButton),
-        tr("Clear all filters"),
-        84);
+        tr("Reset all history filters"),
+        112);
+    styleActionButton(
+        historyDeleteButton_,
+        qApp->style()->standardIcon(QStyle::SP_TrashIcon),
+        tr("Delete all history records matching the current filters"),
+        148);
     historyStatusLabel_ = createMetricValue(tr("0 records"));
     historyStatusLabel_->setObjectName(QStringLiteral("historyStatusLabel"));
 
@@ -1389,6 +1854,7 @@ QWidget* MainWindow::createHistoryPanel()
     queryActionsLayout->addStretch();
     queryActionsLayout->addWidget(historyRefreshButton_);
     queryActionsLayout->addWidget(historyClearButton_);
+    queryActionsLayout->addWidget(historyDeleteButton_);
     filterLayout->addLayout(queryActionsLayout);
 
     QHBoxLayout* statusLayout = new QHBoxLayout();
@@ -1406,6 +1872,134 @@ QWidget* MainWindow::createHistoryPanel()
     panelLayout->addWidget(createSectionTitle(tr("Query")));
     panelLayout->addLayout(filterLayout);
     panelLayout->addWidget(historyTableView_, 1);
+    panelLayout->addLayout(statusLayout);
+
+    return panel;
+}
+
+QWidget* MainWindow::createRecognitionEventsPanel()
+{
+    QFrame* panel = new QFrame();
+    panel->setObjectName(QStringLiteral("recognitionEventsPanel"));
+
+    auto createSectionTitle = [](const QString& text) {
+        QLabel* label = new QLabel(text);
+        label->setObjectName(QStringLiteral("sectionTitle"));
+        return label;
+    };
+
+    recognitionEventModel_ = new FaceRecognitionEventTableModel(this);
+    recognitionEventTableView_ = new QTableView(panel);
+    recognitionEventTableView_->setModel(recognitionEventModel_);
+    recognitionEventTableView_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    recognitionEventTableView_->setSelectionMode(QAbstractItemView::SingleSelection);
+    recognitionEventTableView_->setAlternatingRowColors(true);
+    recognitionEventTableView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    recognitionEventTableView_->setSortingEnabled(false);
+    recognitionEventTableView_->verticalHeader()->setVisible(false);
+    recognitionEventTableView_->horizontalHeader()->setStretchLastSection(true);
+    recognitionEventTableView_->horizontalHeader()->setDefaultAlignment(
+        Qt::AlignLeft | Qt::AlignVCenter);
+    recognitionEventTableView_->horizontalHeader()->setSectionResizeMode(
+        QHeaderView::ResizeToContents);
+    recognitionEventTableView_->setMinimumHeight(80);
+    recognitionEventTableView_->setSizePolicy(
+        QSizePolicy::Expanding,
+        QSizePolicy::Expanding);
+
+    recognitionEventSessionCombo_ = new QComboBox(panel);
+    styleComboBox(recognitionEventSessionCombo_, 200);
+    recognitionEventTypeCombo_ = new QComboBox(panel);
+    recognitionEventTypeCombo_->addItem(tr("All events"), QString());
+    recognitionEventTypeCombo_->addItem(
+        tr("Recognized"),
+        QStringLiteral("face_recognized"));
+    recognitionEventTypeCombo_->addItem(
+        tr("Unknown"),
+        QStringLiteral("face_unknown"));
+    recognitionEventTypeCombo_->addItem(
+        tr("Low similarity"),
+        QStringLiteral("face_low_similarity"));
+    recognitionEventTypeCombo_->addItem(
+        tr("Ambiguous"),
+        QStringLiteral("face_ambiguous"));
+    styleComboBox(recognitionEventTypeCombo_, 170);
+
+    recognitionEventSourceEdit_ = new QLineEdit(panel);
+    recognitionEventSourceEdit_->setPlaceholderText(tr("Source"));
+    styleLineEdit(recognitionEventSourceEdit_, 220);
+    recognitionEventFaceEdit_ = new QLineEdit(panel);
+    recognitionEventFaceEdit_->setPlaceholderText(tr("Face code or name"));
+    styleLineEdit(recognitionEventFaceEdit_, 220);
+
+    recognitionEventLimitSpinBox_ = new QSpinBox(panel);
+    recognitionEventLimitSpinBox_->setRange(10, 5000);
+    recognitionEventLimitSpinBox_->setSingleStep(50);
+    recognitionEventLimitSpinBox_->setValue(200);
+    styleNumericSpin(recognitionEventLimitSpinBox_, 100);
+
+    recognitionEventRefreshButton_ = new QPushButton(tr("Refresh"), panel);
+    recognitionEventClearButton_ = new QPushButton(tr("Reset Filters"), panel);
+    recognitionEventDeleteButton_ = new QPushButton(tr("Delete Events"), panel);
+    recognitionEventDeleteButton_->setObjectName(QStringLiteral("dangerButton"));
+    styleActionButton(
+        recognitionEventRefreshButton_,
+        qApp->style()->standardIcon(QStyle::SP_BrowserReload),
+        tr("Refresh recognition events"),
+        84);
+    styleActionButton(
+        recognitionEventClearButton_,
+        qApp->style()->standardIcon(QStyle::SP_DialogResetButton),
+        tr("Reset all event filters"),
+        112);
+    styleActionButton(
+        recognitionEventDeleteButton_,
+        qApp->style()->standardIcon(QStyle::SP_TrashIcon),
+        tr("Delete all recognition events matching the current filters"),
+        136);
+    recognitionEventStatusLabel_ = createMetricValue(tr("0 events"));
+    recognitionEventStatusLabel_->setObjectName(
+        QStringLiteral("recognitionEventStatusLabel"));
+
+    QHBoxLayout* firstFilterLayout = new QHBoxLayout();
+    firstFilterLayout->setContentsMargins(0, 0, 0, 0);
+    firstFilterLayout->setSpacing(10);
+    firstFilterLayout->addWidget(createMetricLabel(tr("Session")));
+    firstFilterLayout->addWidget(recognitionEventSessionCombo_, 1);
+    firstFilterLayout->addWidget(createMetricLabel(tr("Type")));
+    firstFilterLayout->addWidget(recognitionEventTypeCombo_, 1);
+
+    QHBoxLayout* secondFilterLayout = new QHBoxLayout();
+    secondFilterLayout->setContentsMargins(0, 0, 0, 0);
+    secondFilterLayout->setSpacing(10);
+    secondFilterLayout->addWidget(recognitionEventSourceEdit_, 1);
+    secondFilterLayout->addWidget(recognitionEventFaceEdit_, 1);
+
+    QHBoxLayout* actionLayout = new QHBoxLayout();
+    actionLayout->setContentsMargins(0, 0, 0, 0);
+    actionLayout->setSpacing(10);
+    actionLayout->addWidget(createMetricLabel(tr("Limit")));
+    actionLayout->addWidget(recognitionEventLimitSpinBox_);
+    actionLayout->addStretch();
+    actionLayout->addWidget(recognitionEventRefreshButton_);
+    actionLayout->addWidget(recognitionEventClearButton_);
+    actionLayout->addWidget(recognitionEventDeleteButton_);
+
+    QHBoxLayout* statusLayout = new QHBoxLayout();
+    statusLayout->setContentsMargins(0, 0, 0, 0);
+    statusLayout->setSpacing(10);
+    statusLayout->addWidget(createMetricLabel(tr("Status")));
+    statusLayout->addWidget(recognitionEventStatusLabel_);
+    statusLayout->addStretch();
+
+    QVBoxLayout* panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(18, 14, 18, 14);
+    panelLayout->setSpacing(10);
+    panelLayout->addWidget(createSectionTitle(tr("Recognition Events")));
+    panelLayout->addLayout(firstFilterLayout);
+    panelLayout->addLayout(secondFilterLayout);
+    panelLayout->addLayout(actionLayout);
+    panelLayout->addWidget(recognitionEventTableView_, 1);
     panelLayout->addLayout(statusLayout);
 
     return panel;
@@ -1438,13 +2032,16 @@ QWidget* MainWindow::createFaceLibraryPanel()
     faceNameEdit_->setPlaceholderText(tr("Display name"));
     styleLineEdit(faceNameEdit_, 220);
     faceImagePathEdit_ = new QLineEdit(panel);
-    faceImagePathEdit_->setPlaceholderText(tr("Reference image or folder"));
+    faceImagePathEdit_->setPlaceholderText(
+        tr("Select one or more face images or enter a folder"));
     styleLineEdit(faceImagePathEdit_, 240);
     faceNotesEdit_ = new QLineEdit(panel);
     faceNotesEdit_->setPlaceholderText(tr("Notes"));
     styleLineEdit(faceNotesEdit_, 240);
     faceImageBrowseButton_ = new QPushButton(tr("..."), panel);
     styleBrowseButton(faceImageBrowseButton_);
+    faceImageBrowseButton_->setToolTip(
+        tr("Select one or more face reference images"));
     faceAddButton_ = new QPushButton(tr("Add"), panel);
     faceRemoveButton_ = new QPushButton(tr("Remove"), panel);
     faceRefreshButton_ = new QPushButton(tr("Refresh"), panel);
@@ -1478,7 +2075,7 @@ QWidget* MainWindow::createFaceLibraryPanel()
     formLayout->addWidget(faceCodeEdit_, 0, 1);
     formLayout->addWidget(createMetricLabel(tr("Name")), 0, 2);
     formLayout->addWidget(faceNameEdit_, 0, 3);
-    formLayout->addWidget(createMetricLabel(tr("Image")), 1, 0);
+    formLayout->addWidget(createMetricLabel(tr("Images")), 1, 0);
     formLayout->addWidget(faceImagePathEdit_, 1, 1, 1, 2);
     formLayout->addWidget(faceImageBrowseButton_, 1, 3);
     formLayout->addWidget(createMetricLabel(tr("Notes")), 2, 0);
@@ -1565,6 +2162,12 @@ void MainWindow::applyStyle()
             border-radius: 0 0 8px 8px;
         }
 
+        #recognitionEventsPanel {
+            background: #131B24;
+            border: 0;
+            border-radius: 0 0 8px 8px;
+        }
+
         #inspectorTabs {
             background: transparent;
             border: 0;
@@ -1607,6 +2210,16 @@ void MainWindow::applyStyle()
         QTabBar::tab:hover {
             background: #16212B;
             color: #F2F7FC;
+        }
+
+        #activeConfigurationStatusLabel {
+            background: #0E151D;
+            color: #DCE7F2;
+            border: 1px solid #293848;
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-size: 12px;
+            line-height: 1.35em;
         }
 
         #settingsPanel {
@@ -1734,6 +2347,22 @@ void MainWindow::applyStyle()
             border-color: #91DCE3;
         }
 
+        #dangerButton {
+            background: #342028;
+            border-color: #8B4A59;
+            color: #FFDCE2;
+        }
+
+        #dangerButton:hover {
+            background: #4A2732;
+            border-color: #C56A7C;
+            color: #FFFFFF;
+        }
+
+        #dangerButton:pressed {
+            background: #28171D;
+        }
+
         QPushButton:disabled {
             background: #151D27;
             border-color: #263442;
@@ -1776,12 +2405,43 @@ void MainWindow::connectSignals()
     connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopVideo);
     connect(historyRefreshButton_, &QPushButton::clicked, this, &MainWindow::refreshHistory);
     connect(historyClearButton_, &QPushButton::clicked, this, &MainWindow::clearHistoryFilters);
+    connect(
+        historyDeleteButton_,
+        &QPushButton::clicked,
+        this,
+        &MainWindow::deleteHistoryRecords);
+    connect(
+        recognitionEventRefreshButton_,
+        &QPushButton::clicked,
+        this,
+        &MainWindow::refreshRecognitionEvents);
+    connect(
+        recognitionEventClearButton_,
+        &QPushButton::clicked,
+        this,
+        &MainWindow::clearRecognitionEventFilters);
+    connect(
+        recognitionEventDeleteButton_,
+        &QPushButton::clicked,
+        this,
+        &MainWindow::deleteRecognitionEvents);
     connect(historyFaceBindButton_, &QPushButton::clicked, this, &MainWindow::bindSelectedHistoryFace);
     connect(historyFaceClearButton_, &QPushButton::clicked, this, &MainWindow::clearSelectedHistoryFace);
     connect(onnxBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseOnnxPath);
     connect(labelsBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseLabelsPath);
     connect(exportBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseExportDirectory);
     connect(faceImageBrowseButton_, &QPushButton::clicked, this, &MainWindow::browseFaceImagePath);
+    connect(
+        faceImagePathEdit_,
+        &QLineEdit::textEdited,
+        this,
+        [this](const QString&) {
+            faceSelectedReferencePaths_.clear();
+            if (faceImagePathEdit_ != nullptr)
+            {
+                faceImagePathEdit_->setToolTip(QString());
+            }
+        });
     connect(applyDetectorButton_, &QPushButton::clicked, this, &MainWindow::applyDetectorSettings);
     connect(
         faceRecognitionApplyButton_,
@@ -1808,6 +2468,76 @@ void MainWindow::connectSignals()
         QOverload<double>::of(&QDoubleSpinBox::valueChanged),
         this,
         [this](double) { updateFaceRecognitionDiagnostics(); });
+    connect(
+        confidenceSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateActiveConfigurationStatus(); });
+    connect(
+        nmsSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateActiveConfigurationStatus(); });
+    connect(
+        maxDetectionsSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        inputWidthSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        inputHeightSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        classCountSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        detectEverySpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        faceTrackerIouSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateActiveConfigurationStatus(); });
+    connect(
+        faceTrackerCenterDistanceSpinBox_,
+        QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this,
+        [this](double) { updateActiveConfigurationStatus(); });
+    connect(
+        faceTrackerMissedUpdatesSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        faceTrackerLostDurationSpinBox_,
+        QOverload<int>::of(&QSpinBox::valueChanged),
+        this,
+        [this](int) { updateActiveConfigurationStatus(); });
+    connect(
+        onnxPathEdit_,
+        &QLineEdit::textChanged,
+        this,
+        [this](const QString&) { updateActiveConfigurationStatus(); });
+    connect(
+        labelsPathEdit_,
+        &QLineEdit::textChanged,
+        this,
+        [this](const QString&) { updateActiveConfigurationStatus(); });
+    connect(
+        faceFeatureModelPathEdit_,
+        &QLineEdit::textChanged,
+        this,
+        [this](const QString&) { updateActiveConfigurationStatus(); });
     connect(facePresetButton_, &QPushButton::clicked, this, &MainWindow::applyFaceDetectorPreset);
     connect(clearOverlayButton_, &QPushButton::clicked, this, &MainWindow::clearDetectionOverlay);
     connect(restoreDefaultsButton_, &QPushButton::clicked, this, &MainWindow::restoreDefaultSettings);
@@ -1821,6 +2551,16 @@ void MainWindow::connectSignals()
         &MainWindow::updatePreviewMode);
     connect(historySourceEdit_, &QLineEdit::returnPressed, this, &MainWindow::refreshHistory);
     connect(historyClassEdit_, &QLineEdit::returnPressed, this, &MainWindow::refreshHistory);
+    connect(
+        recognitionEventSourceEdit_,
+        &QLineEdit::returnPressed,
+        this,
+        &MainWindow::refreshRecognitionEvents);
+    connect(
+        recognitionEventFaceEdit_,
+        &QLineEdit::returnPressed,
+        this,
+        &MainWindow::refreshRecognitionEvents);
     connect(historyStartCheck_, &QCheckBox::toggled, historyStartEdit_, &QDateTimeEdit::setEnabled);
     connect(historyEndCheck_, &QCheckBox::toggled, historyEndEdit_, &QDateTimeEdit::setEnabled);
     connect(
@@ -1828,6 +2568,16 @@ void MainWindow::connectSignals()
         QOverload<int>::of(&QComboBox::currentIndexChanged),
         this,
         &MainWindow::refreshHistory);
+    connect(
+        recognitionEventSessionCombo_,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        &MainWindow::refreshRecognitionEvents);
+    connect(
+        recognitionEventTypeCombo_,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        &MainWindow::refreshRecognitionEvents);
 
     connect(&player_, &VideoPlayer::frameReady, this, &MainWindow::displayFrame);
     connect(&player_, &VideoPlayer::detectionFrameReady, this, &MainWindow::displayDetectionFrame);
@@ -1922,6 +2672,11 @@ void MainWindow::initializeControlService()
 void MainWindow::applyCurrentDetectorConfig()
 {
     player_.setDetectorConfig(collectDetectorConfig());
+}
+
+void MainWindow::applyCurrentFaceTrackerConfig()
+{
+    player_.setFaceTrackerConfig(collectFaceTrackerConfig());
 }
 
 bool MainWindow::applyCurrentFaceRecognitionConfig()
@@ -2052,6 +2807,7 @@ void MainWindow::applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config)
         return;
     }
 
+    player_.stop();
     finishStorageSession();
     videoWidget_->clear();
     videoWidget_->setPlaceholderText(tr("Loading remote task..."));
@@ -2101,6 +2857,7 @@ void MainWindow::restoreViewerSettings()
         settingsStore_.load(defaultViewerSettings_);
     applyViewerSettingsToUi(settings);
     applyCurrentDetectorConfig();
+    applyCurrentFaceTrackerConfig();
     applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
     qDebug() << "Viewer settings path:" << settingsStore_.filePath();
@@ -2118,6 +2875,7 @@ void MainWindow::saveViewerSettings()
 void MainWindow::applyViewerSettingsToUi(const ivp::viewer::ViewerSettings& settings)
 {
     loadDetectorConfig(settings.detectorConfig);
+    loadFaceTrackerConfig(settings.faceTrackerConfig);
     loadFaceRecognitionConfig(settings.faceRecognitionConfig);
     loadDeliveryConfig(settings.delivery);
     updateDetectorParameterState();
@@ -2127,6 +2885,7 @@ ivp::viewer::ViewerSettings MainWindow::collectViewerSettings() const
 {
     ivp::viewer::ViewerSettings settings;
     settings.detectorConfig = collectDetectorConfig();
+    settings.faceTrackerConfig = collectFaceTrackerConfig();
     settings.faceRecognitionConfig = collectFaceRecognitionConfig();
     settings.delivery = collectDeliveryConfig();
     return settings;
@@ -2136,6 +2895,7 @@ void MainWindow::restoreDefaultSettings()
 {
     applyViewerSettingsToUi(defaultViewerSettings_);
     applyCurrentDetectorConfig();
+    applyCurrentFaceTrackerConfig();
     applyCurrentFaceRecognitionConfig();
     applyCurrentDeliveryConfig();
     saveViewerSettings();
@@ -2179,6 +2939,45 @@ void MainWindow::loadDetectorConfig(const ivp::DetectorConfig& config)
     {
         labelsPathEdit_->setText(QString::fromStdString(config.labelsPath));
     }
+}
+
+void MainWindow::loadFaceTrackerConfig(const ivp::FaceTrackerConfig& config)
+{
+    if (faceTrackerIouSpinBox_ != nullptr)
+    {
+        faceTrackerIouSpinBox_->setValue(config.minIntersectionOverUnion);
+    }
+    if (faceTrackerCenterDistanceSpinBox_ != nullptr)
+    {
+        faceTrackerCenterDistanceSpinBox_->setValue(config.maxCenterDistanceRatio);
+    }
+    if (faceTrackerMissedUpdatesSpinBox_ != nullptr)
+    {
+        faceTrackerMissedUpdatesSpinBox_->setValue(config.maxMissedUpdates);
+    }
+    if (faceTrackerLostDurationSpinBox_ != nullptr)
+    {
+        faceTrackerLostDurationSpinBox_->setValue(
+            static_cast<int>(config.maxLostDurationMs));
+    }
+}
+
+ivp::FaceTrackerConfig MainWindow::collectFaceTrackerConfig() const
+{
+    ivp::FaceTrackerConfig config = player_.faceTrackerConfig();
+    config.minIntersectionOverUnion = faceTrackerIouSpinBox_ == nullptr
+        ? config.minIntersectionOverUnion
+        : static_cast<float>(faceTrackerIouSpinBox_->value());
+    config.maxCenterDistanceRatio = faceTrackerCenterDistanceSpinBox_ == nullptr
+        ? config.maxCenterDistanceRatio
+        : static_cast<float>(faceTrackerCenterDistanceSpinBox_->value());
+    config.maxMissedUpdates = faceTrackerMissedUpdatesSpinBox_ == nullptr
+        ? config.maxMissedUpdates
+        : faceTrackerMissedUpdatesSpinBox_->value();
+    config.maxLostDurationMs = faceTrackerLostDurationSpinBox_ == nullptr
+        ? config.maxLostDurationMs
+        : faceTrackerLostDurationSpinBox_->value();
+    return config;
 }
 
 void MainWindow::loadFaceRecognitionConfig(
@@ -2421,6 +3220,7 @@ void MainWindow::browseLabelsPath()
 void MainWindow::applyDetectorSettings()
 {
     const ivp::DetectorConfig config = collectDetectorConfig();
+    const ivp::FaceTrackerConfig trackerConfig = collectFaceTrackerConfig();
 
     // VideoPlayer owns the inference thread, so detector replacement must go
     // through it instead of touching detector objects from the UI layer.
@@ -2431,6 +3231,16 @@ void MainWindow::applyDetectorSettings()
             : player_.lastError();
         QMessageBox::warning(this, tr("Detector Parameters"), message);
         statusValueLabel_->setText(tr("Detector Error"));
+        return;
+    }
+
+    if (!player_.applyFaceTrackerConfig(trackerConfig))
+    {
+        const QString message = player_.lastError().isEmpty()
+            ? tr("Could not apply face tracking parameters.")
+            : player_.lastError();
+        QMessageBox::warning(this, tr("Face Tracking Parameters"), message);
+        statusValueLabel_->setText(tr("Tracking Error"));
         return;
     }
 
@@ -2532,14 +3342,30 @@ void MainWindow::browseExportDirectory()
 
 void MainWindow::browseFaceImagePath()
 {
-    const QString path = QFileDialog::getOpenFileName(
+    QFileDialog dialog(
         this,
-        tr("Select Face Image"),
+        tr("Select Face Reference Images"),
         QDir::currentPath(),
-        tr("Image Files (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*.*)"));
-    if (!path.isEmpty() && faceImagePathEdit_ != nullptr)
+        tr("Image Files (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;All Files (*.*)"));
+    dialog.setFileMode(QFileDialog::ExistingFiles);
+    dialog.setViewMode(QFileDialog::Detail);
+    if (dialog.exec() != QDialog::Accepted)
     {
-        faceImagePathEdit_->setText(path);
+        return;
+    }
+
+    const QStringList paths = dialog.selectedFiles();
+    if (paths.isEmpty())
+    {
+        return;
+    }
+
+    faceSelectedReferencePaths_ = paths;
+    if (faceImagePathEdit_ != nullptr)
+    {
+        faceImagePathEdit_->setText(
+            tr("%1 face images selected").arg(paths.size()));
+        faceImagePathEdit_->setToolTip(paths.join(QLatin1Char('\n')));
     }
 }
 
@@ -2859,6 +3685,104 @@ void MainWindow::updateFaceRecognitionDiagnostics()
                 .arg(hasPendingChanges ? tr("Yes") : tr("No"))
                 .arg(error));
     }
+
+    updateActiveConfigurationStatus();
+}
+
+void MainWindow::updateActiveConfigurationStatus()
+{
+    if (activeConfigurationStatusLabel_ == nullptr)
+    {
+        return;
+    }
+
+    const ivp::DetectorConfig activeDetector = player_.detectorConfig();
+    const ivp::FaceRecognitionConfig activeRecognition =
+        player_.faceRecognitionConfig();
+    const ivp::FaceTrackerConfig activeTracker = player_.faceTrackerConfig();
+    const ivp::DetectorConfig pendingDetector = collectDetectorConfig();
+    const ivp::FaceTrackerConfig pendingTracker = collectFaceTrackerConfig();
+    const ivp::FaceRecognitionConfig pendingRecognition =
+        collectFaceRecognitionConfig();
+
+    const bool detectorPending = !sameDetectorConfig(
+        pendingDetector,
+        activeDetector);
+    const bool recognitionPending = !sameFaceRecognitionConfig(
+        pendingRecognition,
+        activeRecognition);
+    const bool trackerPending = !sameFaceTrackerConfig(
+        pendingTracker,
+        activeTracker);
+
+    const QString detectorPath = QString::fromStdString(activeDetector.onnxPath);
+    const QString featurePath =
+        QString::fromStdString(activeRecognition.featureModelPath);
+    QString pending;
+    if (detectorPending && trackerPending && recognitionPending)
+    {
+        pending = tr("Pending Apply: detector + tracking + recognition");
+    }
+    else if (detectorPending && trackerPending)
+    {
+        pending = tr("Pending Apply: detector + tracking");
+    }
+    else if (detectorPending && recognitionPending)
+    {
+        pending = tr("Pending Apply: detector + recognition");
+    }
+    else if (trackerPending && recognitionPending)
+    {
+        pending = tr("Pending Apply: tracking + recognition");
+    }
+    else if (detectorPending)
+    {
+        pending = tr("Pending Apply: detector");
+    }
+    else if (recognitionPending)
+    {
+        pending = tr("Pending Apply: recognition");
+    }
+    else if (trackerPending)
+    {
+        pending = tr("Pending Apply: tracking");
+    }
+    else
+    {
+        pending = tr("Applied");
+    }
+
+    const QString text = tr(
+        "Runtime values\n"
+        "Detector: OpenCV DNN | Confidence %1 | NMS %2 | Every N %3\n"
+        "Max %4 | Input %5 x %6 | Classes %7\n"
+        "Detector ONNX: %8\n"
+        "Recognition: %9 | Similarity %10 | Margin %11 | Min Face %12 px | Padding %13\n"
+        "Feature ONNX: %14\n"
+        "Tracking: IoU %15 | Center %16 | Max Misses %17 | Lost %18 ms\n"
+        "State: %19")
+        .arg(activeDetector.confidenceThreshold, 0, 'f', 3)
+        .arg(activeDetector.nmsThreshold, 0, 'f', 3)
+        .arg(activeDetector.detectEveryNFrames)
+        .arg(activeDetector.maxDetections)
+        .arg(activeDetector.inputWidth)
+        .arg(activeDetector.inputHeight)
+        .arg(activeDetector.classCount)
+        .arg(detectorPath.isEmpty() ? tr("Unknown") : detectorPath)
+        .arg(activeRecognition.enabled ? tr("Enabled") : tr("Disabled"))
+        .arg(activeRecognition.similarityThreshold, 0, 'f', 3)
+        .arg(activeRecognition.minSimilarityMargin, 0, 'f', 3)
+        .arg(activeRecognition.minFaceSizePixels)
+        .arg(activeRecognition.facePaddingRatio, 0, 'f', 2)
+        .arg(featurePath.isEmpty() ? tr("Unknown") : featurePath)
+        .arg(activeTracker.minIntersectionOverUnion, 0, 'f', 2)
+        .arg(activeTracker.maxCenterDistanceRatio, 0, 'f', 2)
+        .arg(activeTracker.maxMissedUpdates)
+        .arg(activeTracker.maxLostDurationMs)
+        .arg(pending);
+
+    activeConfigurationStatusLabel_->setText(text);
+    activeConfigurationStatusLabel_->setToolTip(text);
 }
 
 void MainWindow::reloadFaceIdentities()
@@ -2945,24 +3869,30 @@ void MainWindow::addFaceIdentity()
 
     QString storedRelativeReferencePath;
     QString storedAbsoluteReferencePath;
-    if (faceImagePathEdit_ != nullptr)
+    int storedImageCount = 0;
+    QStringList selectedReferencePaths = faceSelectedReferencePaths_;
+    if (selectedReferencePaths.isEmpty() && faceImagePathEdit_ != nullptr)
     {
-        const QString selectedReferencePath = faceImagePathEdit_->text().trimmed();
-        if (!selectedReferencePath.isEmpty())
+        const QString manuallyEnteredPath = faceImagePathEdit_->text().trimmed();
+        if (!manuallyEnteredPath.isEmpty())
         {
-            storedAbsoluteReferencePath = storeFaceReferenceImage(
-                selectedReferencePath,
-                code,
-                &storedRelativeReferencePath);
-            if (storedAbsoluteReferencePath.isEmpty())
-            {
-                QMessageBox::warning(
-                    this,
-                    tr("Face Library"),
-                    tr("Could not store reference image in the project: %1")
-                        .arg(selectedReferencePath));
-                return;
-            }
+            selectedReferencePaths.append(manuallyEnteredPath);
+        }
+    }
+    if (!selectedReferencePaths.isEmpty())
+    {
+        storedAbsoluteReferencePath = storeFaceReferenceImages(
+            selectedReferencePaths,
+            code,
+            &storedRelativeReferencePath,
+            &storedImageCount);
+        if (storedAbsoluteReferencePath.isEmpty())
+        {
+            QMessageBox::warning(
+                this,
+                tr("Face Library"),
+                tr("Could not store the selected face reference images in the project."));
+            return;
         }
     }
 
@@ -3002,7 +3932,9 @@ void MainWindow::addFaceIdentity()
     reference.faceCode = savedIdentity->faceCode;
     reference.faceName = savedIdentity->displayName;
     reference.imagePath = storedAbsoluteReferencePath.isEmpty()
-        ? savedIdentity->referenceImagePath
+        ? projectResourcePath(
+              QString::fromStdString(savedIdentity->referenceImagePath))
+              .toStdString()
         : storedAbsoluteReferencePath.toStdString();
 
     faceReferenceRecognizer_.initialize(player_.faceRecognitionConfig());
@@ -3033,7 +3965,7 @@ void MainWindow::addFaceIdentity()
                 QMessageBox::warning(
                     this,
                     tr("Face Library"),
-                tr("Identity saved, but no usable face feature was extracted: %1")
+                    tr("Identity saved, but no usable face feature was extracted: %1")
                         .arg(QString::fromStdString(
                             faceReferenceRecognizer_.lastError())));
             }
@@ -3051,6 +3983,12 @@ void MainWindow::addFaceIdentity()
         return;
     }
 
+    if (storedImageCount > 0)
+    {
+        qInfo() << "Stored face reference images:" << storedImageCount
+                << "generated feature templates:" << templates.size();
+    }
+
     if (faceCodeEdit_ != nullptr)
     {
         faceCodeEdit_->clear();
@@ -3062,7 +4000,9 @@ void MainWindow::addFaceIdentity()
     if (faceImagePathEdit_ != nullptr)
     {
         faceImagePathEdit_->clear();
+        faceImagePathEdit_->setToolTip(QString());
     }
+    faceSelectedReferencePaths_.clear();
     if (faceNotesEdit_ != nullptr)
     {
         faceNotesEdit_->clear();
@@ -3332,13 +4272,30 @@ void MainWindow::startStorageSession(const QString& inputUrl)
 
     storageValueLabel_->setText(tr("Recording"));
     reloadHistorySessions();
+    reloadRecognitionEventSessions();
+    historyRefreshPending_ = true;
+    historyLiveRefreshTimer_.start();
 }
 
 void MainWindow::finishStorageSession()
 {
+    historyLiveRefreshTimer_.stop();
     if (storageSessionId_ <= 0)
     {
+        historyRefreshPending_ = false;
         return;
+    }
+
+    const ivp::FaceTrackSnapshots endedTracks =
+        player_.takeEndedFaceTracks();
+    if (!endedTracks.empty()
+        && !detectionStorage_.saveFaceTrackSnapshots(
+            storageSessionId_,
+            endedTracks))
+    {
+        storageValueLabel_->setText(tr("Error"));
+        qWarning() << "Could not persist ended face tracks:"
+                   << QString::fromStdString(detectionStorage_.lastError());
     }
 
     if (!detectionStorage_.finishSession(storageSessionId_))
@@ -3354,6 +4311,7 @@ void MainWindow::finishStorageSession()
     }
 
     storageSessionId_ = 0;
+    historyRefreshPending_ = false;
 }
 
 void MainWindow::reloadHistorySessions()
@@ -3390,6 +4348,45 @@ void MainWindow::reloadHistorySessions()
     }
 
     historySessionCombo_->setCurrentIndex(selectedIndex);
+}
+
+void MainWindow::reloadRecognitionEventSessions()
+{
+    if (recognitionEventSessionCombo_ == nullptr)
+    {
+        return;
+    }
+
+    const qlonglong selectedSessionId =
+        recognitionEventSessionCombo_->currentData().toLongLong();
+    const QSignalBlocker blocker(recognitionEventSessionCombo_);
+
+    recognitionEventSessionCombo_->clear();
+    recognitionEventSessionCombo_->addItem(
+        tr("All sessions"),
+        QVariant::fromValue<qlonglong>(0));
+
+    if (!detectionStorage_.isOpen())
+    {
+        return;
+    }
+
+    const ivp::InspectionSessionSummaries sessions =
+        detectionStorage_.recentSessions(100);
+    int selectedIndex = 0;
+    for (const ivp::InspectionSessionSummary& session : sessions)
+    {
+        recognitionEventSessionCombo_->addItem(
+            formatSessionLabel(session),
+            QVariant::fromValue<qlonglong>(
+                static_cast<qlonglong>(session.sessionId)));
+        if (session.sessionId == selectedSessionId)
+        {
+            selectedIndex = recognitionEventSessionCombo_->count() - 1;
+        }
+    }
+
+    recognitionEventSessionCombo_->setCurrentIndex(selectedIndex);
 }
 
 ivp::DetectionHistoryQuery MainWindow::collectHistoryQuery() const
@@ -3440,6 +4437,59 @@ ivp::DetectionHistoryQuery MainWindow::collectHistoryQuery() const
     if (historyLimitSpinBox_ != nullptr)
     {
         query.limit = static_cast<std::size_t>(historyLimitSpinBox_->value());
+    }
+
+    return query;
+}
+
+ivp::FaceRecognitionEventQuery MainWindow::collectRecognitionEventQuery() const
+{
+    ivp::FaceRecognitionEventQuery query;
+
+    if (recognitionEventSessionCombo_ != nullptr)
+    {
+        const qlonglong sessionId =
+            recognitionEventSessionCombo_->currentData().toLongLong();
+        if (sessionId > 0)
+        {
+            query.sessionId = static_cast<std::int64_t>(sessionId);
+        }
+    }
+
+    if (recognitionEventSourceEdit_ != nullptr)
+    {
+        const QString source =
+            recognitionEventSourceEdit_->text().trimmed();
+        if (!source.isEmpty())
+        {
+            query.sourceLike = source.toStdString();
+        }
+    }
+
+    if (recognitionEventTypeCombo_ != nullptr)
+    {
+        const QString eventType =
+            recognitionEventTypeCombo_->currentData().toString().trimmed();
+        if (!eventType.isEmpty())
+        {
+            query.eventType = eventType.toStdString();
+        }
+    }
+
+    if (recognitionEventFaceEdit_ != nullptr)
+    {
+        const QString face =
+            recognitionEventFaceEdit_->text().trimmed();
+        if (!face.isEmpty())
+        {
+            query.faceLike = face.toStdString();
+        }
+    }
+
+    if (recognitionEventLimitSpinBox_ != nullptr)
+    {
+        query.limit = static_cast<std::size_t>(
+            recognitionEventLimitSpinBox_->value());
     }
 
     return query;

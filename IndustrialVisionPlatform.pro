@@ -19,10 +19,12 @@ SOURCES += \
         apps/viewer/main.cpp \
         apps/viewer/MainWindow.cpp \
         apps/viewer/DetectionHistoryTableModel.cpp \
+        apps/viewer/FaceRecognitionEventTableModel.cpp \
         apps/viewer/FaceLibraryTableModel.cpp \
         apps/viewer/ViewerSettingsStore.cpp \
         apps/viewer/VideoDisplayWidget.cpp \
         modules/recognition/src/FaceRecognizer.cpp \
+        modules/tracking/src/FaceTracker.cpp \
         modules/control/src/DetectionControlServer.cpp \
         modules/inference/src/YoloPreprocessor.cpp \
         modules/inference/src/YoloPostprocessor.cpp \
@@ -43,11 +45,13 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 HEADERS += \
     apps/viewer/MainWindow.h \
     apps/viewer/DetectionHistoryTableModel.h \
+    apps/viewer/FaceRecognitionEventTableModel.h \
     apps/viewer/FaceLibraryTableModel.h \
     apps/viewer/ViewerSettingsStore.h \
     apps/viewer/VideoDisplayWidget.h \
     modules/common/include/common/BlockingQueue.h \
     modules/common/include/common/DetectionResult.h \
+    modules/common/include/common/FaceTrack.h \
     modules/common/include/common/FaceFeature.h \
     modules/common/include/common/FaceRecognitionResult.h \
     modules/common/include/common/RuntimeStatus.h \
@@ -59,6 +63,7 @@ HEADERS += \
     modules/inference/include/inference/YoloPostprocessor.h \
     modules/inference/include/inference/YoloOpenCVDnnDetector.h \
     modules/recognition/include/recognition/FaceRecognizer.h \
+    modules/tracking/include/tracking/FaceTracker.h \
     modules/network/include/network/DetectionDeliverySettings.h \
     modules/network/include/network/DetectionFramePacket.h \
     modules/network/include/network/DetectionResultDelivery.h \
@@ -127,6 +132,7 @@ INCLUDEPATH += $$PWD/modules/common/include
 INCLUDEPATH += $$PWD/modules/control/include
 INCLUDEPATH += $$PWD/modules/inference/include
 INCLUDEPATH += $$PWD/modules/recognition/include
+INCLUDEPATH += $$PWD/modules/tracking/include
 INCLUDEPATH += $$PWD/modules/network/include
 INCLUDEPATH += $$PWD/modules/pipeline/include
 INCLUDEPATH += $$PWD/modules/playback/include

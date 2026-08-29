@@ -14,11 +14,6 @@ QString textOrFallback(const std::string& text, const QString& fallback)
     return text.empty() ? fallback : QString::fromStdString(text);
 }
 
-QVariant int64Variant(std::int64_t value)
-{
-    return QVariant::fromValue<qlonglong>(static_cast<qlonglong>(value));
-}
-
 } // namespace
 
 FaceLibraryTableModel::FaceLibraryTableModel(QObject* parent)
@@ -65,7 +60,8 @@ QVariant FaceLibraryTableModel::data(const QModelIndex& index, int role) const
     if (role == Qt::ToolTipRole)
     {
         return QStringLiteral(
-            "Face #%1\nCode: %2\nName: %3\nImage: %4\nNotes: %5")
+            "No.: %1\nDatabase ID: %2\nCode: %3\nName: %4\nReferences: %5\nNotes: %6")
+            .arg(index.row() + 1)
             .arg(row.faceId)
             .arg(QString::fromStdString(row.faceCode))
             .arg(QString::fromStdString(row.displayName))
@@ -81,7 +77,9 @@ QVariant FaceLibraryTableModel::data(const QModelIndex& index, int role) const
     switch (index.column())
     {
     case FaceIdColumn:
-        return int64Variant(row.faceId);
+        // The table number is only a visual sequence. The database faceId is
+        // kept internally for stable links to features and detection records.
+        return index.row() + 1;
     case CodeColumn:
         return textOrFallback(row.faceCode, QStringLiteral("--"));
     case NameColumn:
@@ -112,13 +110,13 @@ QVariant FaceLibraryTableModel::headerData(
     switch (section)
     {
     case FaceIdColumn:
-        return tr("ID");
+        return tr("No.");
     case CodeColumn:
         return tr("Code");
     case NameColumn:
         return tr("Name");
     case ImageColumn:
-        return tr("Image");
+        return tr("References");
     case NotesColumn:
         return tr("Notes");
     case CreatedColumn:

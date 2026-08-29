@@ -23,6 +23,55 @@ QString exportSuffix(ivp::ResultExportFormat format)
         : QStringLiteral("jsonl");
 }
 
+QJsonObject trackStateToJson(const ivp::FaceTrackSnapshot& snapshot)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("track_id"),
+                 static_cast<double>(snapshot.trackId));
+    object.insert(QStringLiteral("source_id"),
+                 QString::fromStdString(snapshot.sourceId));
+    object.insert(QStringLiteral("first_frame_index"),
+                 static_cast<double>(snapshot.firstFrameIndex));
+    object.insert(QStringLiteral("first_pts_ms"),
+                 static_cast<double>(snapshot.firstPtsMs));
+    object.insert(QStringLiteral("last_frame_index"),
+                 static_cast<double>(snapshot.lastFrameIndex));
+    object.insert(QStringLiteral("last_pts_ms"),
+                 static_cast<double>(snapshot.lastPtsMs));
+    object.insert(QStringLiteral("duration_ms"),
+                 static_cast<double>(snapshot.durationMs));
+    object.insert(QStringLiteral("detection_count"), snapshot.detectionCount);
+    object.insert(QStringLiteral("missed_updates"), snapshot.missedUpdates);
+    object.insert(QStringLiteral("active"), snapshot.active);
+
+    const auto stateToJson = [](const ivp::FaceTrackRecognitionState& state) {
+        QJsonObject stateObject;
+        stateObject.insert(QStringLiteral("available"), state.available);
+        stateObject.insert(QStringLiteral("matched"), state.matched);
+        stateObject.insert(QStringLiteral("decision"),
+                           QString::fromStdString(state.decision));
+        stateObject.insert(QStringLiteral("face_id"),
+                           state.faceId.has_value()
+                               ? static_cast<double>(*state.faceId)
+                               : 0.0);
+        stateObject.insert(QStringLiteral("face_code"),
+                           QString::fromStdString(state.faceCode));
+        stateObject.insert(QStringLiteral("face_name"),
+                           QString::fromStdString(state.faceName));
+        stateObject.insert(QStringLiteral("similarity"), state.similarity);
+        stateObject.insert(QStringLiteral("threshold"), state.threshold);
+        stateObject.insert(QStringLiteral("observed_at_pts_ms"),
+                           static_cast<double>(state.observedAtPtsMs));
+        return stateObject;
+    };
+
+    object.insert(QStringLiteral("first_recognition"),
+                  stateToJson(snapshot.firstRecognition));
+    object.insert(QStringLiteral("last_recognition"),
+                  stateToJson(snapshot.lastRecognition));
+    return object;
+}
+
 QJsonObject detectionToJson(
     const ivp::DetectionResult& result,
     const QString& fallbackSourceId)
@@ -35,9 +84,15 @@ QJsonObject detectionToJson(
     object.insert(QStringLiteral("frame_index"),
                   static_cast<double>(result.frameIndex));
     object.insert(QStringLiteral("pts_ms"), static_cast<double>(result.ptsMs));
+    object.insert(QStringLiteral("track_id"),
+                  static_cast<double>(result.trackId));
     object.insert(QStringLiteral("class_id"), result.classId);
     object.insert(QStringLiteral("class_name"), QString::fromStdString(result.className));
     object.insert(QStringLiteral("confidence"), result.confidence);
+    if (result.trackState.trackId > 0)
+    {
+        object.insert(QStringLiteral("track"), trackStateToJson(result.trackState));
+    }
 
     QJsonObject box;
     box.insert(QStringLiteral("x"), result.box.x);
@@ -396,6 +451,7 @@ QByteArray DetectionResultDelivery::csvPayload(
             QByteArray::number(packet.frameIndex),
             QByteArray::number(packet.ptsMs),
             QByteArray::number(packet.recordedAtMs),
+            QByteArray::number(result.trackId),
             QByteArray::number(result.classId),
             escapeCsv(className),
             QByteArray::number(result.confidence, 'f', 6),
@@ -410,7 +466,21 @@ QByteArray DetectionResultDelivery::csvPayload(
             QByteArray::number(result.face.distance, 'f', 6),
             QByteArray::number(result.face.similarity, 'f', 6),
             QByteArray::number(result.face.threshold, 'f', 6),
-            escapeCsv(QString::fromStdString(result.face.recognizerName))};
+            escapeCsv(QString::fromStdString(result.face.recognizerName)),
+            QByteArray::number(result.trackState.durationMs),
+            QByteArray::number(result.trackState.active ? 1 : 0),
+            escapeCsv(QString::fromStdString(
+                result.trackState.firstRecognition.decision)),
+            escapeCsv(QString::fromStdString(
+                result.trackState.firstRecognition.faceCode)),
+            escapeCsv(QString::fromStdString(
+                result.trackState.firstRecognition.faceName)),
+            escapeCsv(QString::fromStdString(
+                result.trackState.lastRecognition.decision)),
+            escapeCsv(QString::fromStdString(
+                result.trackState.lastRecognition.faceCode)),
+            escapeCsv(QString::fromStdString(
+                result.trackState.lastRecognition.faceName))};
 
         for (int i = 0; i < columns.size(); ++i)
         {
@@ -430,10 +500,12 @@ QByteArray DetectionResultDelivery::csvHeader()
 {
     return QByteArray(
         "task_id,production_line_id,batch_id,source_id,"
-        "frame_index,pts_ms,recorded_at_ms,class_id,"
+        "frame_index,pts_ms,recorded_at_ms,track_id,class_id,"
         "class_name,confidence,box_x,box_y,box_width,box_height,"
         "face_id,face_code,face_name,face_distance,face_similarity,"
-        "face_threshold,face_recognizer\r\n");
+        "face_threshold,face_recognizer,track_duration_ms,track_active,"
+        "track_first_decision,track_first_face_code,track_first_face_name,"
+        "track_last_decision,track_last_face_code,track_last_face_name\r\n");
 }
 
 QByteArray DetectionResultDelivery::escapeCsv(const QString& value)

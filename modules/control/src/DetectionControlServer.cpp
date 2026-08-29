@@ -360,15 +360,69 @@ bool parseTaskConfig(
     return true;
 }
 
+QJsonObject trackStateToJson(const ivp::FaceTrackSnapshot& snapshot)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("track_id"),
+                 static_cast<double>(snapshot.trackId));
+    object.insert(QStringLiteral("source_id"),
+                 QString::fromStdString(snapshot.sourceId));
+    object.insert(QStringLiteral("first_frame_index"),
+                 static_cast<double>(snapshot.firstFrameIndex));
+    object.insert(QStringLiteral("first_pts_ms"),
+                 static_cast<double>(snapshot.firstPtsMs));
+    object.insert(QStringLiteral("last_frame_index"),
+                 static_cast<double>(snapshot.lastFrameIndex));
+    object.insert(QStringLiteral("last_pts_ms"),
+                 static_cast<double>(snapshot.lastPtsMs));
+    object.insert(QStringLiteral("duration_ms"),
+                 static_cast<double>(snapshot.durationMs));
+    object.insert(QStringLiteral("detection_count"), snapshot.detectionCount);
+    object.insert(QStringLiteral("missed_updates"), snapshot.missedUpdates);
+    object.insert(QStringLiteral("active"), snapshot.active);
+
+    const auto stateToJson = [](const ivp::FaceTrackRecognitionState& state) {
+        QJsonObject stateObject;
+        stateObject.insert(QStringLiteral("available"), state.available);
+        stateObject.insert(QStringLiteral("matched"), state.matched);
+        stateObject.insert(QStringLiteral("decision"),
+                           QString::fromStdString(state.decision));
+        stateObject.insert(QStringLiteral("face_id"),
+                           state.faceId.has_value()
+                               ? static_cast<double>(*state.faceId)
+                               : 0.0);
+        stateObject.insert(QStringLiteral("face_code"),
+                           QString::fromStdString(state.faceCode));
+        stateObject.insert(QStringLiteral("face_name"),
+                           QString::fromStdString(state.faceName));
+        stateObject.insert(QStringLiteral("similarity"), state.similarity);
+        stateObject.insert(QStringLiteral("threshold"), state.threshold);
+        stateObject.insert(QStringLiteral("observed_at_pts_ms"),
+                           static_cast<double>(state.observedAtPtsMs));
+        return stateObject;
+    };
+
+    object.insert(QStringLiteral("first_recognition"),
+                  stateToJson(snapshot.firstRecognition));
+    object.insert(QStringLiteral("last_recognition"),
+                  stateToJson(snapshot.lastRecognition));
+    return object;
+}
+
 QJsonObject detectionResultToJson(const ivp::DetectionResult& result)
 {
     QJsonObject object;
     object.insert(QStringLiteral("source_id"), QString::fromStdString(result.sourceId));
     object.insert(QStringLiteral("frame_index"), static_cast<double>(result.frameIndex));
     object.insert(QStringLiteral("pts_ms"), static_cast<double>(result.ptsMs));
+    object.insert(QStringLiteral("track_id"), static_cast<double>(result.trackId));
     object.insert(QStringLiteral("class_id"), result.classId);
     object.insert(QStringLiteral("class_name"), QString::fromStdString(result.className));
     object.insert(QStringLiteral("confidence"), result.confidence);
+    if (result.trackState.trackId > 0)
+    {
+        object.insert(QStringLiteral("track"), trackStateToJson(result.trackState));
+    }
 
     QJsonObject box;
     box.insert(QStringLiteral("x"), result.box.x);

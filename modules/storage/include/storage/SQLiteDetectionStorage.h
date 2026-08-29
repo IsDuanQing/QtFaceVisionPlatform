@@ -37,6 +37,15 @@ struct DetectionHistoryQuery
     std::size_t limit = 200;
 };
 
+struct FaceRecognitionEventQuery
+{
+    std::optional<std::int64_t> sessionId;
+    std::optional<std::string> sourceLike;
+    std::optional<std::string> eventType;
+    std::optional<std::string> faceLike;
+    std::size_t limit = 200;
+};
+
 struct DetectionHistoryRow
 {
     std::int64_t recordId = 0;
@@ -47,6 +56,7 @@ struct DetectionHistoryRow
     std::optional<std::int64_t> sessionEndedAtMs;
     std::int64_t frameIndex = 0;
     std::int64_t ptsMs = 0;
+    std::int64_t trackId = 0;
     std::int64_t recordedAtMs = 0;
     std::int64_t frameObjectCount = 0;
     int classId = -1;
@@ -61,6 +71,14 @@ struct DetectionHistoryRow
     float faceSimilarity = 0.0F;
     float faceThreshold = 0.0F;
     std::string faceRecognizerName;
+    std::int64_t trackDurationMs = 0;
+    bool trackActive = false;
+    std::string trackFirstDecision;
+    std::string trackFirstFaceCode;
+    std::string trackFirstFaceName;
+    std::string trackLastDecision;
+    std::string trackLastFaceCode;
+    std::string trackLastFaceName;
 };
 
 using InspectionSessionSummaries = std::vector<InspectionSessionSummary>;
@@ -87,6 +105,7 @@ struct FaceRecognitionEvent
     std::string sourceId;
     std::int64_t frameIndex = 0;
     std::int64_t ptsMs = 0;
+    std::int64_t trackId = 0;
     std::string eventType;
     std::optional<std::int64_t> faceId;
     std::string faceCode;
@@ -96,6 +115,14 @@ struct FaceRecognitionEvent
     float threshold = 0.0F;
     std::string recognizerName;
     std::int64_t createdAtMs = 0;
+    std::int64_t trackDurationMs = 0;
+    bool trackActive = false;
+    std::string trackFirstDecision;
+    std::string trackFirstFaceCode;
+    std::string trackFirstFaceName;
+    std::string trackLastDecision;
+    std::string trackLastFaceCode;
+    std::string trackLastFaceName;
 };
 
 using FaceRecognitionEvents = std::vector<FaceRecognitionEvent>;
@@ -125,6 +152,9 @@ public:
         std::int64_t frameIndex,
         std::int64_t ptsMs,
         const DetectionResults& results);
+    bool saveFaceTrackSnapshots(
+        std::int64_t sessionId,
+        const FaceTrackSnapshots& snapshots);
 
     DetectionResults recentResults(std::size_t maxCount) const;
     DetectionResults resultsForFrame(
@@ -134,6 +164,10 @@ public:
     InspectionSessionSummaries recentSessions(std::size_t maxCount) const;
     DetectionHistoryRows recentHistory(std::size_t maxCount) const;
     DetectionHistoryRows queryHistory(const DetectionHistoryQuery& query) const;
+    // Deletes every matching record; query.limit only controls list display.
+    bool deleteHistoryRecords(
+        const DetectionHistoryQuery& query,
+        std::size_t* deletedCount = nullptr);
 
     bool saveFaceIdentity(const FaceIdentityEntry& entry);
     bool removeFaceIdentity(std::int64_t faceId);
@@ -146,6 +180,12 @@ public:
     FaceFeatureTemplates allFaceFeatures() const;
     FaceRecognitionEvents recentFaceRecognitionEvents(
         std::size_t maxCount) const;
+    FaceRecognitionEvents queryFaceRecognitionEvents(
+        const FaceRecognitionEventQuery& query) const;
+    // Deletes every matching event; query.limit only controls list display.
+    bool deleteRecognitionEvents(
+        const FaceRecognitionEventQuery& query,
+        std::size_t* deletedCount = nullptr);
     bool bindFaceIdentity(std::int64_t recordId, std::int64_t faceId);
     bool clearFaceIdentity(std::int64_t recordId);
 
@@ -171,6 +211,10 @@ private:
         const DetectionResult& result,
         std::int64_t recordedAtMs,
         std::int64_t* recordId);
+    bool upsertFaceTrackLocked(
+        std::int64_t sessionId,
+        const FaceTrackSnapshot& snapshot,
+        std::int64_t updatedAtMs);
     bool insertRecognizedFaceLinkLocked(
         std::int64_t recordId,
         const DetectionResult& result);
@@ -181,11 +225,15 @@ private:
         std::int64_t fallbackFrameIndex,
         std::int64_t fallbackPtsMs,
         const DetectionResult& result,
+        const std::string& eventType,
+        const std::optional<std::int64_t>& faceId,
         std::int64_t createdAtMs);
     bool shouldInsertRecognitionEventLocked(
         std::int64_t sessionId,
         const std::string& sourceId,
-        std::int64_t faceId,
+        const std::string& eventType,
+        const std::optional<std::int64_t>& faceId,
+        std::int64_t trackId,
         std::int64_t createdAtMs,
         bool* shouldInsert);
     DetectionResults readResultsLocked(

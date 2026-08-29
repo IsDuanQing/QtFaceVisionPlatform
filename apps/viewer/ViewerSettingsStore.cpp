@@ -11,7 +11,7 @@
 namespace
 {
 
-constexpr int kSettingsVersion = 3;
+constexpr int kSettingsVersion = 4;
 
 constexpr int kMinInputSize = 32;
 constexpr int kMaxInputSize = 4096;
@@ -22,6 +22,12 @@ constexpr int kMaxEveryNFrames = 1000;
 constexpr int kDefaultNetworkPort = 9000;
 constexpr int kMinNetworkPort = 1;
 constexpr int kMaxNetworkPort = 65535;
+constexpr float kMinTrackerCenterDistance = 0.0F;
+constexpr float kMaxTrackerCenterDistance = 3.0F;
+constexpr int kMinTrackerMissedUpdates = 0;
+constexpr int kMaxTrackerMissedUpdates = 1000;
+constexpr int kMinTrackerLostDurationMs = 0;
+constexpr int kMaxTrackerLostDurationMs = 120000;
 
 QString detectorGroupKey(const QString& key)
 {
@@ -31,6 +37,11 @@ QString detectorGroupKey(const QString& key)
 QString recognitionGroupKey(const QString& key)
 {
     return QStringLiteral("recognition/") + key;
+}
+
+QString trackingGroupKey(const QString& key)
+{
+    return QStringLiteral("tracking/") + key;
 }
 
 std::string validOrDefaultPath(
@@ -178,6 +189,31 @@ ViewerSettings ViewerSettingsStore::load(const ViewerSettings& defaults) const
         settings.detectorConfig.classCount = 1;
     }
 
+    settings.faceTrackerConfig.minIntersectionOverUnion = qBound(
+        0.0F,
+        storage.value(
+            trackingGroupKey(QStringLiteral("minIntersectionOverUnion")),
+            defaults.faceTrackerConfig.minIntersectionOverUnion).toFloat(),
+        1.0F);
+    settings.faceTrackerConfig.maxCenterDistanceRatio = qBound(
+        kMinTrackerCenterDistance,
+        storage.value(
+            trackingGroupKey(QStringLiteral("maxCenterDistanceRatio")),
+            defaults.faceTrackerConfig.maxCenterDistanceRatio).toFloat(),
+        kMaxTrackerCenterDistance);
+    settings.faceTrackerConfig.maxMissedUpdates = qBound(
+        kMinTrackerMissedUpdates,
+        storage.value(
+            trackingGroupKey(QStringLiteral("maxMissedUpdates")),
+            defaults.faceTrackerConfig.maxMissedUpdates).toInt(),
+        kMaxTrackerMissedUpdates);
+    settings.faceTrackerConfig.maxLostDurationMs = qBound(
+        kMinTrackerLostDurationMs,
+        storage.value(
+            trackingGroupKey(QStringLiteral("maxLostDurationMs")),
+            defaults.faceTrackerConfig.maxLostDurationMs).toInt(),
+        kMaxTrackerLostDurationMs);
+
     settings.faceRecognitionConfig.enabled = storage.value(
         recognitionGroupKey(QStringLiteral("enabled")),
         defaults.faceRecognitionConfig.enabled).toBool();
@@ -314,6 +350,18 @@ bool ViewerSettingsStore::save(const ViewerSettings& settings) const
     storage.setValue(
         detectorGroupKey(QStringLiteral("labelsPath")),
         QString::fromStdString(settings.detectorConfig.labelsPath));
+    storage.setValue(
+        trackingGroupKey(QStringLiteral("minIntersectionOverUnion")),
+        settings.faceTrackerConfig.minIntersectionOverUnion);
+    storage.setValue(
+        trackingGroupKey(QStringLiteral("maxCenterDistanceRatio")),
+        settings.faceTrackerConfig.maxCenterDistanceRatio);
+    storage.setValue(
+        trackingGroupKey(QStringLiteral("maxMissedUpdates")),
+        settings.faceTrackerConfig.maxMissedUpdates);
+    storage.setValue(
+        trackingGroupKey(QStringLiteral("maxLostDurationMs")),
+        settings.faceTrackerConfig.maxLostDurationMs);
     storage.setValue(
         recognitionGroupKey(QStringLiteral("enabled")),
         settings.faceRecognitionConfig.enabled);

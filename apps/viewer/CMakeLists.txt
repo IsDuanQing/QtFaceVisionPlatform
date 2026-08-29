@@ -4,6 +4,8 @@ add_executable(IndustrialVisionViewer
     MainWindow.h
     DetectionHistoryTableModel.cpp
     DetectionHistoryTableModel.h
+    FaceRecognitionEventTableModel.cpp
+    FaceRecognitionEventTableModel.h
     FaceLibraryTableModel.cpp
     FaceLibraryTableModel.h
     ViewerSettingsStore.cpp

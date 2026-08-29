@@ -8,6 +8,8 @@
 #include <QLabel>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QStringList>
+#include <QTimer>
 
 #include "control/DetectionControlServer.h"
 #include "common/DetectionResult.h"
@@ -22,6 +24,7 @@
 
 class DetectionHistoryTableModel;
 class FaceLibraryTableModel;
+class FaceRecognitionEventTableModel;
 class QCheckBox;
 class QComboBox;
 class QDateTimeEdit;
@@ -62,7 +65,11 @@ private slots:
     void showPlayerError(const QString& message);
     void refreshHistory();
     void refreshFaceLibrary();
+    void refreshRecognitionEvents();
     void clearHistoryFilters();
+    void clearRecognitionEventFilters();
+    void deleteHistoryRecords();
+    void deleteRecognitionEvents();
     void browseOnnxPath();
     void browseLabelsPath();
     void browseExportDirectory();
@@ -92,10 +99,12 @@ private:
     void connectSignals();
     QWidget* createHistoryPanel();
     QWidget* createFaceLibraryPanel();
+    QWidget* createRecognitionEventsPanel();
     QWidget* createSettingsPanel();
     void initializeStorage();
     void initializeControlService();
     void applyCurrentDetectorConfig();
+    void applyCurrentFaceTrackerConfig();
     bool applyCurrentFaceRecognitionConfig();
     void applyRemoteTaskConfig(const ivp::DetectionTaskConfig& config);
     void restoreViewerSettings();
@@ -104,6 +113,8 @@ private:
     ivp::viewer::ViewerSettings collectViewerSettings() const;
     void loadDetectorConfig(const ivp::DetectorConfig& config);
     ivp::DetectorConfig collectDetectorConfig() const;
+    void loadFaceTrackerConfig(const ivp::FaceTrackerConfig& config);
+    ivp::FaceTrackerConfig collectFaceTrackerConfig() const;
     void loadFaceRecognitionConfig(const ivp::FaceRecognitionConfig& config);
     ivp::FaceRecognitionConfig collectFaceRecognitionConfig() const;
     void loadDeliveryConfig(const ivp::DetectionDeliverySettings& config);
@@ -118,11 +129,14 @@ private:
     void startStorageSession(const QString& inputUrl);
     void finishStorageSession();
     void reloadHistorySessions();
+    void reloadRecognitionEventSessions();
     void reloadFaceIdentities();
     void reloadFaceRecognitionGallery();
     bool rebuildFaceRecognitionGalleryFromReferences();
     void updateFaceRecognitionDiagnostics();
+    void updateActiveConfigurationStatus();
     ivp::DetectionHistoryQuery collectHistoryQuery() const;
+    ivp::FaceRecognitionEventQuery collectRecognitionEventQuery() const;
     void resetDetectionSummary();
     void updateDetectionSummary();
     PreviewMode currentPreviewMode() const;
@@ -145,6 +159,8 @@ private:
     ivp::viewer::ViewerSettingsStore settingsStore_;
     ivp::viewer::ViewerSettings defaultViewerSettings_;
     std::int64_t storageSessionId_;
+    QTimer historyLiveRefreshTimer_;
+    bool historyRefreshPending_;
 
     VideoDisplayWidget* videoWidget_;
     QLabel* titleLabel_;
@@ -158,6 +174,7 @@ private:
     QLabel* storageValueLabel_;
     QLabel* controlStatusLabel_;
     QLabel* historyStatusLabel_;
+    QLabel* recognitionEventStatusLabel_;
     QLabel* deliveryStatusLabel_;
     QLabel* runtimeSummaryValueLabel_;
     QLabel* displayedFrameValueLabel_;
@@ -171,6 +188,10 @@ private:
     QPushButton* stopButton_;
     QPushButton* historyRefreshButton_;
     QPushButton* historyClearButton_;
+    QPushButton* historyDeleteButton_;
+    QPushButton* recognitionEventRefreshButton_;
+    QPushButton* recognitionEventClearButton_;
+    QPushButton* recognitionEventDeleteButton_;
     QPushButton* restoreDefaultsButton_;
     QPushButton* applyDetectorButton_;
     QPushButton* facePresetButton_;
@@ -179,8 +200,10 @@ private:
 
     DetectionHistoryTableModel* historyModel_;
     FaceLibraryTableModel* faceLibraryModel_;
+    FaceRecognitionEventTableModel* recognitionEventModel_;
     QTableView* historyTableView_;
     QTableView* faceLibraryTableView_;
+    QTableView* recognitionEventTableView_;
     QComboBox* historySessionCombo_;
     QLineEdit* historySourceEdit_;
     QLineEdit* historyClassEdit_;
@@ -192,6 +215,11 @@ private:
     QComboBox* historyFaceCombo_;
     QPushButton* historyFaceBindButton_;
     QPushButton* historyFaceClearButton_;
+    QComboBox* recognitionEventSessionCombo_;
+    QComboBox* recognitionEventTypeCombo_;
+    QLineEdit* recognitionEventSourceEdit_;
+    QLineEdit* recognitionEventFaceEdit_;
+    QSpinBox* recognitionEventLimitSpinBox_;
 
     QDoubleSpinBox* confidenceSpinBox_;
     QDoubleSpinBox* nmsSpinBox_;
@@ -200,6 +228,10 @@ private:
     QSpinBox* inputHeightSpinBox_;
     QSpinBox* classCountSpinBox_;
     QSpinBox* detectEverySpinBox_;
+    QDoubleSpinBox* faceTrackerIouSpinBox_;
+    QDoubleSpinBox* faceTrackerCenterDistanceSpinBox_;
+    QSpinBox* faceTrackerMissedUpdatesSpinBox_;
+    QSpinBox* faceTrackerLostDurationSpinBox_;
     QLineEdit* onnxPathEdit_;
     QLineEdit* labelsPathEdit_;
     QLineEdit* faceFeatureModelPathEdit_;
@@ -221,6 +253,7 @@ private:
     QLineEdit* faceCodeEdit_;
     QLineEdit* faceNameEdit_;
     QLineEdit* faceImagePathEdit_;
+    QStringList faceSelectedReferencePaths_;
     QLineEdit* faceNotesEdit_;
     QPushButton* faceImageBrowseButton_;
     QPushButton* faceAddButton_;
@@ -229,6 +262,7 @@ private:
     QLabel* faceLibraryStatusLabel_;
     QLabel* faceRecognitionStatusLabel_;
     QLabel* faceFeatureModelStatusLabel_;
+    QLabel* activeConfigurationStatusLabel_;
 
     qint64 displayedPreviewFrameIndex_;
     qint64 latestDetectionFrameIndex_;

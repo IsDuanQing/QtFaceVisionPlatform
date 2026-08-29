@@ -198,6 +198,7 @@ int main(int argc, char** argv)
     result.sourceId = packet.sourceId;
     result.frameIndex = packet.frameIndex;
     result.ptsMs = packet.ptsMs;
+    result.trackId = 81;
     result.classId = 7;
     result.className = "scratch";
     result.confidence = 0.93F;
@@ -220,6 +221,7 @@ int main(int argc, char** argv)
     assert(detections.size() == 1);
     const QJsonObject firstDetection = detections.at(0).toObject();
     assert(firstDetection.value(QStringLiteral("class_name")).toString() == QStringLiteral("scratch"));
+    assert(firstDetection.value(QStringLiteral("track_id")).toInt() == 81);
     assert(firstDetection.value(QStringLiteral("confidence")).toDouble() > 0.92);
     const QJsonObject box = firstDetection.value(QStringLiteral("box")).toObject();
     assert(box.value(QStringLiteral("width")).toDouble() == 30.0);

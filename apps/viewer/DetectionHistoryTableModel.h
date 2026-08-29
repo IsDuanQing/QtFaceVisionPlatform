@@ -32,6 +32,10 @@ private:
         RecordedAtColumn,
         SessionColumn,
         SourceColumn,
+        TrackColumn,
+        TrackDurationColumn,
+        TrackFirstStateColumn,
+        TrackLastStateColumn,
         FrameColumn,
         PtsColumn,
         ClassColumn,
@@ -45,7 +49,12 @@ private:
 
     static QString formatTimestamp(std::int64_t milliseconds);
     static QString formatPts(std::int64_t milliseconds);
+    static QString formatDuration(std::int64_t milliseconds);
     static QString formatBox(const ivp::BoundingBox& box);
+    static QString formatTrackState(
+        const std::string& decision,
+        const std::string& faceCode,
+        const std::string& faceName);
 
     ivp::DetectionHistoryRows rows_;
 };

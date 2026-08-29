@@ -6,6 +6,7 @@
 #include "inference/IDetector.h"
 #include "common/FaceFeature.h"
 #include "network/DetectionDeliverySettings.h"
+#include "tracking/FaceTracker.h"
 
 namespace ivp::viewer
 {
@@ -13,6 +14,7 @@ namespace ivp::viewer
 struct ViewerSettings
 {
     ivp::DetectorConfig detectorConfig;
+    ivp::FaceTrackerConfig faceTrackerConfig;
     ivp::FaceRecognitionConfig faceRecognitionConfig;
     ivp::DetectionDeliverySettings delivery;
 };

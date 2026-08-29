@@ -51,6 +51,20 @@ add_test(
     COMMAND ivp_yolo_opencv_dnn_detector_disabled_test
 )
 
+add_executable(ivp_face_tracker_test
+    tracking/FaceTrackerTest.cpp
+)
+
+target_link_libraries(ivp_face_tracker_test
+    PRIVATE
+        ivp_tracking
+)
+
+add_test(
+    NAME ivp_face_tracker_test
+    COMMAND ivp_face_tracker_test
+)
+
 add_executable(ivp_detection_result_delivery_smoke_test
     network/DetectionResultDeliverySmokeTest.cpp
 )

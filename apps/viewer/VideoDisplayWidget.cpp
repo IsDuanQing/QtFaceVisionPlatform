@@ -339,10 +339,14 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
             std::round(result.face.similarity * 100.0F));
         const int thresholdPercent = static_cast<int>(
             std::round(result.face.threshold * 100.0F));
+        const QString trackLabel = result.trackId > 0
+            ? QStringLiteral("T%1  ").arg(result.trackId)
+            : QString();
         QString labelText;
         if (recognized)
         {
-            labelText = QStringLiteral("%1  match %2%")
+            labelText = QStringLiteral("%1%2  match %3%")
+                .arg(trackLabel)
                 .arg(result.face.faceName.empty()
                          ? QString::fromStdString(result.face.faceCode)
                          : QString::fromStdString(result.face.faceName))
@@ -354,7 +358,8 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
                 recognitionDecisionLabel(result.face.decision);
             if (decisionLabel.isEmpty())
             {
-                labelText = QStringLiteral("%1  det %2%")
+                labelText = QStringLiteral("%1%2  det %3%")
+                    .arg(trackLabel)
                     .arg(className)
                     .arg(static_cast<int>(
                         std::round(result.confidence * 100.0F)));
@@ -362,7 +367,8 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
             else if (result.face.decision == "low_similarity"
                      || result.face.decision == "ambiguous")
             {
-                labelText = QStringLiteral("%1  %2 %3%/%4%")
+                labelText = QStringLiteral("%1%2  %3 %4%/%5%")
+                    .arg(trackLabel)
                     .arg(className)
                     .arg(decisionLabel)
                     .arg(similarityPercent)
@@ -370,10 +376,19 @@ void VideoDisplayWidget::drawDetections(QPainter& painter, const QRectF& targetR
             }
             else
             {
-                labelText = QStringLiteral("%1  %2")
+                labelText = QStringLiteral("%1%2  %3")
+                    .arg(trackLabel)
                     .arg(className)
                     .arg(decisionLabel);
             }
+        }
+        if (result.trackState.trackId > 0)
+        {
+            labelText += QStringLiteral("  %1s")
+                .arg(static_cast<double>(result.trackState.durationMs) / 1000.0,
+                     0,
+                     'f',
+                     1);
         }
         const QRect labelBounds = metrics.boundingRect(labelText);
         const QSize labelSize = labelBounds.size() + QSize(14, 8);

@@ -41,6 +41,7 @@ bool waitForCondition(
 ivp::DetectionFramePacket makePacket()
 {
     ivp::DetectionResult result;
+    result.trackId = 81;
     result.classId = 7;
     result.className = "crack";
     result.confidence = 0.93F;
@@ -127,6 +128,7 @@ int main(int argc, char** argv)
     if (!csvText.startsWith(QStringLiteral("task_id,production_line_id,batch_id,source_id"))
         || !csvText.contains(QStringLiteral("task-001"))
         || !csvText.contains(QStringLiteral("camera-1"))
+        || !csvText.contains(QStringLiteral(",81,7,crack,"))
         || !csvText.contains(QStringLiteral("crack")))
     {
         std::cerr << "CSV export content is invalid.\n";
@@ -171,6 +173,7 @@ int main(int argc, char** argv)
     if (!networkPayload.contains("\"type\":\"detection\"")
         || !networkPayload.contains("\"task_id\":\"task-001\"")
         || !networkPayload.contains("\"source_id\":\"camera-1\"")
+        || !networkPayload.contains("\"track_id\":81")
         || !networkPayload.endsWith('\n'))
     {
         std::cerr << "TCP JSON Lines payload is invalid.\n";

@@ -21,10 +21,12 @@
 #include "inference/IDetector.h"
 #include "pipeline/FrameDispatcher.h"
 #include "recognition/FaceRecognizer.h"
+#include "tracking/FaceTracker.h"
 #include "video/FFmpegDecoder.h"
 #include "video/VideoInputConfig.h"
 
 Q_DECLARE_METATYPE(ivp::DetectionResults)
+Q_DECLARE_METATYPE(ivp::FaceTrackSnapshots)
 Q_DECLARE_METATYPE(ivp::RuntimeStatus)
 
 // Coordinates decoding, pixel conversion, and playback timing.
@@ -44,6 +46,10 @@ public:
     void setDetectorConfig(const ivp::DetectorConfig& config);
     bool applyDetectorConfig(const ivp::DetectorConfig& config);
     ivp::DetectorConfig detectorConfig() const;
+    void setFaceTrackerConfig(const ivp::FaceTrackerConfig& config);
+    bool applyFaceTrackerConfig(const ivp::FaceTrackerConfig& config);
+    ivp::FaceTrackerConfig faceTrackerConfig() const;
+    ivp::FaceTrackSnapshots takeEndedFaceTracks();
     bool applyFaceRecognitionConfig(const ivp::FaceRecognitionConfig& config);
     bool setFaceRecognitionGallery(ivp::FaceFeatureTemplates templates);
     ivp::FaceRecognitionConfig faceRecognitionConfig() const;
@@ -124,6 +130,11 @@ private:
     void applyFaceRecognition(
         const ivp::VideoFrame& frame,
         ivp::DetectionResults* results);
+    void finishFaceTracking();
+    void updateFaceTracking(
+        const ivp::VideoFrame& frame,
+        bool detectorRanForFrame,
+        ivp::DetectionResults* results);
 
     FFmpegDecoder decoder_; // 解码器
     std::unique_ptr<ivp::IDetector> detector_; // 检测器
@@ -138,7 +149,9 @@ private:
     std::thread inferenceThread_; // 消费者：AI检测线程
     mutable std::mutex errorMutex_;
     mutable std::mutex detectorMutex_;
+    mutable std::mutex faceTrackerMutex_;
     mutable std::mutex faceRecognizerMutex_;
+    ivp::FaceTracker faceTracker_;
     ivp::FaceRecognizer faceRecognizer_;
     QString fileName_;
     QString lastError_;

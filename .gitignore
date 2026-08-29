@@ -24,7 +24,7 @@ models/yolov8-face/
 videos/
 
 # Local notes and screenshots
-docs/
+
 
 # Runtime data
 *.db

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS detection_records (
     source_id TEXT NOT NULL,
     frame_index INTEGER NOT NULL,
     pts_ms INTEGER NOT NULL,
+    track_id INTEGER NOT NULL DEFAULT 0,
     class_id INTEGER NOT NULL,
     class_name TEXT NOT NULL,
     confidence REAL NOT NULL,
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS face_recognition_events (
     source_id TEXT NOT NULL,
     frame_index INTEGER NOT NULL,
     pts_ms INTEGER NOT NULL,
+    track_id INTEGER NOT NULL DEFAULT 0,
     event_type TEXT NOT NULL,
     face_identity_id INTEGER,
     face_code TEXT NOT NULL,
@@ -114,6 +116,41 @@ CREATE TABLE IF NOT EXISTS face_recognition_events (
     created_at_ms INTEGER NOT NULL,
     FOREIGN KEY(detection_record_id) REFERENCES detection_records(id) ON DELETE CASCADE,
     FOREIGN KEY(face_identity_id) REFERENCES face_identities(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS face_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    source_id TEXT NOT NULL,
+    track_id INTEGER NOT NULL,
+    class_id INTEGER NOT NULL,
+    class_name TEXT NOT NULL,
+    first_frame_index INTEGER NOT NULL,
+    first_pts_ms INTEGER NOT NULL,
+    last_frame_index INTEGER NOT NULL,
+    last_pts_ms INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    detection_count INTEGER NOT NULL,
+    missed_updates INTEGER NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    first_recognition_decision TEXT NOT NULL DEFAULT '',
+    first_face_identity_id INTEGER,
+    first_face_code TEXT NOT NULL DEFAULT '',
+    first_face_name TEXT NOT NULL DEFAULT '',
+    first_similarity REAL NOT NULL DEFAULT 0,
+    first_threshold REAL NOT NULL DEFAULT 0,
+    first_observed_pts_ms INTEGER NOT NULL DEFAULT 0,
+    last_recognition_decision TEXT NOT NULL DEFAULT '',
+    last_face_identity_id INTEGER,
+    last_face_code TEXT NOT NULL DEFAULT '',
+    last_face_name TEXT NOT NULL DEFAULT '',
+    last_similarity REAL NOT NULL DEFAULT 0,
+    last_threshold REAL NOT NULL DEFAULT 0,
+    last_observed_pts_ms INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE(session_id, source_id, track_id),
+    FOREIGN KEY(session_id) REFERENCES inspection_sessions(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_face_recognition_events_created_at
@@ -129,6 +166,23 @@ ON face_recognition_events(
 );
 )SQL";
 
+constexpr const char* kCreateTrackIndexesSql = R"SQL(
+CREATE INDEX IF NOT EXISTS idx_detection_records_track
+ON detection_records(session_id, source_id, track_id, frame_index);
+
+CREATE INDEX IF NOT EXISTS idx_face_recognition_events_track
+ON face_recognition_events(
+    session_id,
+    source_id,
+    track_id,
+    event_type,
+    face_identity_id
+);
+
+CREATE INDEX IF NOT EXISTS idx_face_tracks_session_source
+ON face_tracks(session_id, source_id, track_id);
+)SQL";
+
 constexpr const char* kInsertFrameSql =
     "INSERT INTO detection_frames ("
     "session_id, source_id, frame_index, pts_ms, object_count, recorded_at_ms"
@@ -136,26 +190,81 @@ constexpr const char* kInsertFrameSql =
 
 constexpr const char* kInsertDetectionSql =
     "INSERT INTO detection_records ("
-    "session_id, source_id, frame_index, pts_ms, class_id, class_name, confidence, "
+    "session_id, source_id, frame_index, pts_ms, track_id, class_id, class_name, confidence, "
     "box_x, box_y, box_width, box_height, recorded_at_ms"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+
+constexpr const char* kUpsertFaceTrackSql = R"SQL(
+INSERT INTO face_tracks (
+    session_id, source_id, track_id, class_id, class_name,
+    first_frame_index, first_pts_ms, last_frame_index, last_pts_ms,
+    duration_ms, detection_count, missed_updates, active,
+    first_recognition_decision, first_face_identity_id, first_face_code,
+    first_face_name, first_similarity, first_threshold, first_observed_pts_ms,
+    last_recognition_decision, last_face_identity_id, last_face_code,
+    last_face_name, last_similarity, last_threshold, last_observed_pts_ms,
+    created_at_ms, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(session_id, source_id, track_id) DO UPDATE SET
+    class_id = excluded.class_id,
+    class_name = excluded.class_name,
+    first_frame_index = excluded.first_frame_index,
+    first_pts_ms = excluded.first_pts_ms,
+    last_frame_index = excluded.last_frame_index,
+    last_pts_ms = excluded.last_pts_ms,
+    duration_ms = excluded.duration_ms,
+    detection_count = excluded.detection_count,
+    missed_updates = excluded.missed_updates,
+    active = excluded.active,
+    first_recognition_decision = excluded.first_recognition_decision,
+    first_face_identity_id = excluded.first_face_identity_id,
+    first_face_code = excluded.first_face_code,
+    first_face_name = excluded.first_face_name,
+    first_similarity = excluded.first_similarity,
+    first_threshold = excluded.first_threshold,
+    first_observed_pts_ms = excluded.first_observed_pts_ms,
+    last_recognition_decision = excluded.last_recognition_decision,
+    last_face_identity_id = excluded.last_face_identity_id,
+    last_face_code = excluded.last_face_code,
+    last_face_name = excluded.last_face_name,
+    last_similarity = excluded.last_similarity,
+    last_threshold = excluded.last_threshold,
+    last_observed_pts_ms = excluded.last_observed_pts_ms,
+    updated_at_ms = excluded.updated_at_ms;
+)SQL";
 
 constexpr const char* kRecentResultsSql =
-    "SELECT source_id, frame_index, pts_ms, class_id, class_name, confidence, "
-    "box_x, box_y, box_width, box_height, "
+    "SELECT r.source_id, r.frame_index, r.pts_ms, r.track_id, r.class_id, "
+    "r.class_name, r.confidence, r.box_x, r.box_y, r.box_width, r.box_height, "
     "l.face_identity_id, l.face_code, l.face_name, l.matched_at_ms, "
-    "l.distance, l.similarity, l.threshold_value, l.recognizer_name "
+    "l.distance, l.similarity, l.threshold_value, l.recognizer_name, "
+    "t.track_id, t.first_frame_index, t.first_pts_ms, t.last_frame_index, "
+    "t.last_pts_ms, t.duration_ms, t.detection_count, t.missed_updates, t.active, "
+    "t.first_recognition_decision, t.first_face_identity_id, t.first_face_code, "
+    "t.first_face_name, t.first_similarity, t.first_threshold, t.first_observed_pts_ms, "
+    "t.last_recognition_decision, t.last_face_identity_id, t.last_face_code, "
+    "t.last_face_name, t.last_similarity, t.last_threshold, t.last_observed_pts_ms "
     "FROM detection_records r "
     "LEFT JOIN detection_face_links l ON l.detection_record_id = r.id "
+    "LEFT JOIN face_tracks t ON t.session_id = r.session_id "
+    "AND t.source_id = r.source_id AND t.track_id = r.track_id "
     "ORDER BY r.id DESC LIMIT ?;";
 
 constexpr const char* kFrameResultsSql =
-    "SELECT source_id, frame_index, pts_ms, class_id, class_name, confidence, "
-    "box_x, box_y, box_width, box_height, "
+    "SELECT r.source_id, r.frame_index, r.pts_ms, r.track_id, r.class_id, "
+    "r.class_name, r.confidence, r.box_x, r.box_y, r.box_width, r.box_height, "
     "l.face_identity_id, l.face_code, l.face_name, l.matched_at_ms, "
-    "l.distance, l.similarity, l.threshold_value, l.recognizer_name "
+    "l.distance, l.similarity, l.threshold_value, l.recognizer_name, "
+    "t.track_id, t.first_frame_index, t.first_pts_ms, t.last_frame_index, "
+    "t.last_pts_ms, t.duration_ms, t.detection_count, t.missed_updates, t.active, "
+    "t.first_recognition_decision, t.first_face_identity_id, t.first_face_code, "
+    "t.first_face_name, t.first_similarity, t.first_threshold, t.first_observed_pts_ms, "
+    "t.last_recognition_decision, t.last_face_identity_id, t.last_face_code, "
+    "t.last_face_name, t.last_similarity, t.last_threshold, t.last_observed_pts_ms "
     "FROM detection_records r "
     "LEFT JOIN detection_face_links l ON l.detection_record_id = r.id "
+    "LEFT JOIN face_tracks t ON t.session_id = r.session_id "
+    "AND t.source_id = r.source_id AND t.track_id = r.track_id "
     "WHERE r.session_id = ? AND r.frame_index = ? ORDER BY r.id ASC;";
 
 constexpr const char* kRecentSessionsSql = R"SQL(
@@ -232,19 +341,24 @@ constexpr const char* kInsertRecognizedFaceLinkSql =
 
 constexpr const char* kInsertRecognitionEventSql =
     "INSERT INTO face_recognition_events ("
-    "detection_record_id, session_id, source_id, frame_index, pts_ms, event_type, "
+    "detection_record_id, session_id, source_id, frame_index, pts_ms, track_id, event_type, "
     "face_identity_id, face_code, face_name, distance, similarity, "
     "threshold_value, recognizer_name, created_at_ms"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
-constexpr const char* kRecentRecognitionEventForFaceSql =
+constexpr const char* kRecentRecognitionEventBaseSql =
     "SELECT 1 FROM face_recognition_events "
     "WHERE session_id = ? "
     "AND source_id = ? "
-    "AND face_identity_id = ? "
-    "AND event_type = 'face_recognized' "
-    "AND created_at_ms >= ? "
-    "ORDER BY created_at_ms DESC, id DESC LIMIT 1;";
+    "AND event_type = ? "
+    "AND created_at_ms >= ? ";
+
+constexpr const char* kTrackRecognitionEventBaseSql =
+    "SELECT 1 FROM face_recognition_events "
+    "WHERE session_id = ? "
+    "AND source_id = ? "
+    "AND track_id = ? "
+    "AND event_type = ? ";
 
 constexpr const char* kDeleteFaceFeaturesSql =
     "DELETE FROM face_feature_templates WHERE face_identity_id = ?;";
@@ -268,11 +382,18 @@ constexpr const char* kFaceIdentityByCodeSql =
     "created_at_ms, updated_at_ms "
     "FROM face_identities WHERE face_code = ? LIMIT 1;";
 
-constexpr const char* kRecentRecognitionEventsSql =
-    "SELECT id, detection_record_id, session_id, source_id, frame_index, pts_ms, "
-    "event_type, face_identity_id, face_code, face_name, distance, similarity, "
-    "threshold_value, recognizer_name, created_at_ms "
-    "FROM face_recognition_events ORDER BY created_at_ms DESC, id DESC LIMIT ?;";
+constexpr const char* kRecognitionEventsSelectSql =
+    "SELECT e.id, e.detection_record_id, e.session_id, e.source_id, e.frame_index, e.pts_ms, "
+    "e.track_id, e.event_type, e.face_identity_id, e.face_code, e.face_name, e.distance, e.similarity, "
+    "e.threshold_value, e.recognizer_name, e.created_at_ms, "
+    "COALESCE(t.duration_ms, 0), COALESCE(t.active, 0), "
+    "COALESCE(t.first_recognition_decision, ''), COALESCE(t.first_face_code, ''), "
+    "COALESCE(t.first_face_name, ''), COALESCE(t.last_recognition_decision, ''), "
+    "COALESCE(t.last_face_code, ''), COALESCE(t.last_face_name, '') "
+    "FROM face_recognition_events e "
+    "LEFT JOIN face_tracks t ON t.session_id = e.session_id "
+    "AND t.source_id = e.source_id AND t.track_id = e.track_id "
+    "WHERE 1 = 1 ";
 
 constexpr const char* kClearFaceIdentitySql =
     "DELETE FROM detection_face_links WHERE detection_record_id = ?;";
@@ -303,6 +424,160 @@ std::int64_t boundedLimit(std::size_t maxCount)
 std::string likePattern(const std::string& text)
 {
     return "%" + text + "%";
+}
+
+void appendHistoryFilterConditions(
+    std::string& sql,
+    const ivp::DetectionHistoryQuery& query)
+{
+    if (query.sessionId.has_value())
+    {
+        sql += " AND r.session_id = ?";
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        sql += " AND (r.source_id LIKE ? COLLATE NOCASE"
+               " OR s.source_id LIKE ? COLLATE NOCASE"
+               " OR s.input_url LIKE ? COLLATE NOCASE)";
+    }
+    if (query.classLike.has_value() && !query.classLike->empty())
+    {
+        sql += " AND r.class_name LIKE ? COLLATE NOCASE";
+    }
+    if (query.recordedAfterMs.has_value())
+    {
+        sql += " AND r.recorded_at_ms >= ?";
+    }
+    if (query.recordedBeforeMs.has_value())
+    {
+        sql += " AND r.recorded_at_ms <= ?";
+    }
+}
+
+bool bindHistoryFilterConditions(
+    sqlite3_stmt* statement,
+    const ivp::DetectionHistoryQuery& query,
+    int* parameterIndex)
+{
+    if (statement == nullptr || parameterIndex == nullptr)
+    {
+        return false;
+    }
+
+    int& index = *parameterIndex;
+    bool bound = true;
+    auto bindInt64 = [&](std::int64_t value) {
+        bound = bound
+            && sqlite3_bind_int64(statement, index++, value) == SQLITE_OK;
+    };
+    auto bindText = [&](const std::string& value) {
+        bound = bound
+            && sqlite3_bind_text(
+                   statement,
+                   index++,
+                   value.c_str(),
+                   -1,
+                   SQLITE_TRANSIENT)
+                == SQLITE_OK;
+    };
+
+    if (query.sessionId.has_value())
+    {
+        bindInt64(*query.sessionId);
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        const std::string pattern = likePattern(*query.sourceLike);
+        bindText(pattern);
+        bindText(pattern);
+        bindText(pattern);
+    }
+    if (query.classLike.has_value() && !query.classLike->empty())
+    {
+        bindText(likePattern(*query.classLike));
+    }
+    if (query.recordedAfterMs.has_value())
+    {
+        bindInt64(*query.recordedAfterMs);
+    }
+    if (query.recordedBeforeMs.has_value())
+    {
+        bindInt64(*query.recordedBeforeMs);
+    }
+
+    return bound;
+}
+
+void appendRecognitionEventFilterConditions(
+    std::string& sql,
+    const ivp::FaceRecognitionEventQuery& query)
+{
+    if (query.sessionId.has_value())
+    {
+        sql += " AND e.session_id = ?";
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        sql += " AND e.source_id LIKE ? COLLATE NOCASE";
+    }
+    if (query.eventType.has_value() && !query.eventType->empty())
+    {
+        sql += " AND e.event_type = ?";
+    }
+    if (query.faceLike.has_value() && !query.faceLike->empty())
+    {
+        sql += " AND (e.face_code LIKE ? COLLATE NOCASE"
+               " OR e.face_name LIKE ? COLLATE NOCASE)";
+    }
+}
+
+bool bindRecognitionEventFilterConditions(
+    sqlite3_stmt* statement,
+    const ivp::FaceRecognitionEventQuery& query,
+    int* parameterIndex)
+{
+    if (statement == nullptr || parameterIndex == nullptr)
+    {
+        return false;
+    }
+
+    int& index = *parameterIndex;
+    bool bound = true;
+    auto bindInt64 = [&](std::int64_t value) {
+        bound = bound
+            && sqlite3_bind_int64(statement, index++, value) == SQLITE_OK;
+    };
+    auto bindText = [&](const std::string& value) {
+        bound = bound
+            && sqlite3_bind_text(
+                   statement,
+                   index++,
+                   value.c_str(),
+                   -1,
+                   SQLITE_TRANSIENT)
+                == SQLITE_OK;
+    };
+
+    if (query.sessionId.has_value())
+    {
+        bindInt64(*query.sessionId);
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        bindText(likePattern(*query.sourceLike));
+    }
+    if (query.eventType.has_value() && !query.eventType->empty())
+    {
+        bindText(*query.eventType);
+    }
+    if (query.faceLike.has_value() && !query.faceLike->empty())
+    {
+        const std::string pattern = likePattern(*query.faceLike);
+        bindText(pattern);
+        bindText(pattern);
+    }
+
+    return bound;
 }
 
 } // namespace
@@ -528,31 +803,71 @@ bool SQLiteDetectionStorage::saveFrameResults(
             result,
             recordedAtMs,
             &recordId);
-        if (saved && result.face.matched && result.face.faceId.has_value())
+        if (saved)
         {
-            saved = insertRecognizedFaceLinkLocked(recordId, result);
-            bool shouldInsertEvent = false;
-            if (saved)
+            std::string eventType;
+            std::optional<std::int64_t> eventFaceId;
+            if (result.face.matched && result.face.faceId.has_value()
+                && *result.face.faceId > 0)
             {
+                eventType = "face_recognized";
+                eventFaceId = result.face.faceId;
+                saved = insertRecognizedFaceLinkLocked(recordId, result);
+            }
+            else if (result.face.decision == "low_similarity")
+            {
+                eventType = "face_low_similarity";
+            }
+            else if (result.face.decision == "ambiguous")
+            {
+                eventType = "face_ambiguous";
+            }
+            else if (result.face.decision == "no_candidates")
+            {
+                eventType = "face_unknown";
+            }
+
+            if (saved && !eventType.empty())
+            {
+                bool shouldInsertEvent = false;
                 const std::string eventSourceId = result.sourceId.empty()
                     ? sourceId
                     : result.sourceId;
                 saved = shouldInsertRecognitionEventLocked(
                     sessionId,
                     eventSourceId,
-                    *result.face.faceId,
+                    eventType,
+                    eventFaceId,
+                    result.trackId,
                     recordedAtMs,
                     &shouldInsertEvent);
+                if (saved && shouldInsertEvent)
+                {
+                    saved = insertRecognitionEventLocked(
+                        recordId,
+                        sessionId,
+                        sourceId,
+                        frameIndex,
+                        ptsMs,
+                        result,
+                        eventType,
+                        eventFaceId,
+                        recordedAtMs);
+                }
             }
-            if (saved && shouldInsertEvent)
+
+            if (saved && result.trackState.trackId > 0)
             {
-                saved = insertRecognitionEventLocked(
-                    recordId,
+                FaceTrackSnapshot snapshot = result.trackState;
+                if (snapshot.sourceId.empty())
+                {
+                    snapshot.sourceId = result.sourceId.empty()
+                        ? sourceId
+                        : result.sourceId;
+                }
+                saved = upsertFaceTrackLocked(
                     sessionId,
-                    sourceId,
-                    frameIndex,
-                    ptsMs,
-                    result,
+                    snapshot,
                     recordedAtMs);
             }
         }
@@ -564,6 +879,53 @@ bool SQLiteDetectionStorage::saveFrameResults(
         return false;
     }
 
+    if (!executeLocked("COMMIT;"))
+    {
+        executeLocked("ROLLBACK;");
+        return false;
+    }
+
+    lastError_.clear();
+    return true;
+}
+
+bool SQLiteDetectionStorage::saveFaceTrackSnapshots(
+    std::int64_t sessionId,
+    const FaceTrackSnapshots& snapshots)
+{
+    if (snapshots.empty())
+    {
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (database_ == nullptr || sessionId <= 0)
+    {
+        lastError_ = "SQLite database is not open or session id is invalid.";
+        return false;
+    }
+
+    if (!executeLocked("BEGIN IMMEDIATE TRANSACTION;"))
+    {
+        return false;
+    }
+
+    const std::int64_t updatedAtMs = currentTimeMs();
+    bool saved = true;
+    for (const FaceTrackSnapshot& snapshot : snapshots)
+    {
+        if (!saved)
+        {
+            break;
+        }
+        saved = upsertFaceTrackLocked(sessionId, snapshot, updatedAtMs);
+    }
+
+    if (!saved)
+    {
+        executeLocked("ROLLBACK;");
+        return false;
+    }
     if (!executeLocked("COMMIT;"))
     {
         executeLocked("ROLLBACK;");
@@ -681,6 +1043,7 @@ SELECT
     s.ended_at_ms,
     r.frame_index,
     r.pts_ms,
+    r.track_id,
     r.recorded_at_ms,
     COALESCE((
         SELECT f.object_count
@@ -703,10 +1066,22 @@ SELECT
     l.distance,
     l.similarity,
     l.threshold_value,
-    l.recognizer_name
+    l.recognizer_name,
+    COALESCE(t.duration_ms, 0),
+    COALESCE(t.active, 0),
+    COALESCE(t.first_recognition_decision, ''),
+    COALESCE(t.first_face_code, ''),
+    COALESCE(t.first_face_name, ''),
+    COALESCE(t.last_recognition_decision, ''),
+    COALESCE(t.last_face_code, ''),
+    COALESCE(t.last_face_name, '')
 FROM detection_records r
 INNER JOIN inspection_sessions s ON s.id = r.session_id
 LEFT JOIN detection_face_links l ON l.detection_record_id = r.id
+LEFT JOIN face_tracks t
+    ON t.session_id = r.session_id
+    AND t.source_id = r.source_id
+    AND t.track_id = r.track_id
 WHERE 1 = 1
 )SQL";
 
@@ -797,23 +1172,32 @@ WHERE 1 = 1
         row.sessionEndedAtMs = optionalInt64Column(statement, 5);
         row.frameIndex = sqlite3_column_int64(statement, 6);
         row.ptsMs = sqlite3_column_int64(statement, 7);
-        row.recordedAtMs = sqlite3_column_int64(statement, 8);
-        row.frameObjectCount = sqlite3_column_int64(statement, 9);
-        row.classId = sqlite3_column_int(statement, 10);
-        row.className = textColumn(statement, 11);
-        row.confidence = static_cast<float>(sqlite3_column_double(statement, 12));
-        row.box.x = static_cast<float>(sqlite3_column_double(statement, 13));
-        row.box.y = static_cast<float>(sqlite3_column_double(statement, 14));
-        row.box.width = static_cast<float>(sqlite3_column_double(statement, 15));
-        row.box.height = static_cast<float>(sqlite3_column_double(statement, 16));
-        row.faceId = optionalInt64Column(statement, 17);
-        row.faceCode = textColumn(statement, 18);
-        row.faceName = textColumn(statement, 19);
-        row.faceMatchedAtMs = sqlite3_column_int64(statement, 20);
-        row.faceDistance = static_cast<float>(sqlite3_column_double(statement, 21));
-        row.faceSimilarity = static_cast<float>(sqlite3_column_double(statement, 22));
-        row.faceThreshold = static_cast<float>(sqlite3_column_double(statement, 23));
-        row.faceRecognizerName = textColumn(statement, 24);
+        row.trackId = sqlite3_column_int64(statement, 8);
+        row.recordedAtMs = sqlite3_column_int64(statement, 9);
+        row.frameObjectCount = sqlite3_column_int64(statement, 10);
+        row.classId = sqlite3_column_int(statement, 11);
+        row.className = textColumn(statement, 12);
+        row.confidence = static_cast<float>(sqlite3_column_double(statement, 13));
+        row.box.x = static_cast<float>(sqlite3_column_double(statement, 14));
+        row.box.y = static_cast<float>(sqlite3_column_double(statement, 15));
+        row.box.width = static_cast<float>(sqlite3_column_double(statement, 16));
+        row.box.height = static_cast<float>(sqlite3_column_double(statement, 17));
+        row.faceId = optionalInt64Column(statement, 18);
+        row.faceCode = textColumn(statement, 19);
+        row.faceName = textColumn(statement, 20);
+        row.faceMatchedAtMs = sqlite3_column_int64(statement, 21);
+        row.faceDistance = static_cast<float>(sqlite3_column_double(statement, 22));
+        row.faceSimilarity = static_cast<float>(sqlite3_column_double(statement, 23));
+        row.faceThreshold = static_cast<float>(sqlite3_column_double(statement, 24));
+        row.faceRecognizerName = textColumn(statement, 25);
+        row.trackDurationMs = sqlite3_column_int64(statement, 26);
+        row.trackActive = sqlite3_column_int(statement, 27) != 0;
+        row.trackFirstDecision = textColumn(statement, 28);
+        row.trackFirstFaceCode = textColumn(statement, 29);
+        row.trackFirstFaceName = textColumn(statement, 30);
+        row.trackLastDecision = textColumn(statement, 31);
+        row.trackLastFaceCode = textColumn(statement, 32);
+        row.trackLastFaceName = textColumn(statement, 33);
         historyRows.push_back(std::move(row));
     }
 
@@ -829,6 +1213,135 @@ WHERE 1 = 1
 
     sqlite3_finalize(statement);
     return historyRows;
+}
+
+bool SQLiteDetectionStorage::deleteHistoryRecords(
+    const DetectionHistoryQuery& query,
+    std::size_t* deletedCount)
+{
+    if (deletedCount != nullptr)
+    {
+        *deletedCount = 0;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (database_ == nullptr)
+    {
+        lastError_ = "SQLite database is not open.";
+        return false;
+    }
+
+    const std::string selectedRecordIdsSql = R"SQL(
+SELECT r.id
+FROM detection_records r
+INNER JOIN inspection_sessions s ON s.id = r.session_id
+WHERE 1 = 1
+)SQL";
+    std::string selectionSql = selectedRecordIdsSql;
+    appendHistoryFilterConditions(selectionSql, query);
+
+    if (!executeLocked("BEGIN IMMEDIATE TRANSACTION;"))
+    {
+        return false;
+    }
+
+    auto executeDelete = [&](const std::string& sql, const char* errorMessage) {
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(
+                database_,
+                sql.c_str(),
+                -1,
+                &statement,
+                nullptr)
+            != SQLITE_OK)
+        {
+            setLastErrorLocked(errorMessage);
+            return false;
+        }
+
+        int parameterIndex = 1;
+        const bool bound =
+            bindHistoryFilterConditions(
+                statement,
+                query,
+                &parameterIndex);
+        const bool completed = bound && sqlite3_step(statement) == SQLITE_DONE;
+        if (!completed)
+        {
+            setLastErrorLocked(errorMessage);
+        }
+        sqlite3_finalize(statement);
+        return completed;
+    };
+
+    const std::string deleteEventsSql =
+        "DELETE FROM face_recognition_events "
+        "WHERE detection_record_id IN ("
+        + selectionSql
+        + ");";
+    const std::string deleteLinksSql =
+        "DELETE FROM detection_face_links "
+        "WHERE detection_record_id IN ("
+        + selectionSql
+        + ");";
+    const std::string deleteRecordsSql =
+        "DELETE FROM detection_records "
+        "WHERE id IN ("
+        + selectionSql
+        + ");";
+
+    bool completed = executeDelete(
+        deleteEventsSql,
+        "Could not delete recognition events linked to history");
+    completed = completed
+        && executeDelete(
+               deleteLinksSql,
+               "Could not delete face associations linked to history");
+
+    std::size_t removedRecords = 0;
+    if (completed)
+    {
+        completed = executeDelete(
+            deleteRecordsSql,
+            "Could not delete detection history records");
+        if (completed)
+        {
+            removedRecords = static_cast<std::size_t>(
+                std::max(0, sqlite3_changes(database_)));
+        }
+    }
+
+    if (completed
+        && !executeLocked(
+            "DELETE FROM face_tracks "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM detection_records r "
+            "WHERE r.session_id = face_tracks.session_id "
+            "AND r.source_id = face_tracks.source_id "
+            "AND r.track_id = face_tracks.track_id"
+            ");"))
+    {
+        completed = false;
+    }
+
+    if (!completed)
+    {
+        executeLocked("ROLLBACK;");
+        return false;
+    }
+
+    if (!executeLocked("COMMIT;"))
+    {
+        executeLocked("ROLLBACK;");
+        return false;
+    }
+
+    if (deletedCount != nullptr)
+    {
+        *deletedCount = removedRecords;
+    }
+    lastError_.clear();
+    return true;
 }
 
 bool SQLiteDetectionStorage::saveFaceIdentity(const FaceIdentityEntry& entry)
@@ -1129,7 +1642,15 @@ FaceFeatureTemplates SQLiteDetectionStorage::allFaceFeatures() const
 FaceRecognitionEvents SQLiteDetectionStorage::recentFaceRecognitionEvents(
     std::size_t maxCount) const
 {
-    if (maxCount == 0)
+    FaceRecognitionEventQuery query;
+    query.limit = maxCount;
+    return queryFaceRecognitionEvents(query);
+}
+
+FaceRecognitionEvents SQLiteDetectionStorage::queryFaceRecognitionEvents(
+    const FaceRecognitionEventQuery& query) const
+{
+    if (query.limit == 0)
     {
         return {};
     }
@@ -1141,10 +1662,30 @@ FaceRecognitionEvents SQLiteDetectionStorage::recentFaceRecognitionEvents(
         return {};
     }
 
+    std::string sql = kRecognitionEventsSelectSql;
+    if (query.sessionId.has_value())
+    {
+        sql += "AND e.session_id = ? ";
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        sql += "AND e.source_id LIKE ? COLLATE NOCASE ";
+    }
+    if (query.eventType.has_value() && !query.eventType->empty())
+    {
+        sql += "AND e.event_type = ? ";
+    }
+    if (query.faceLike.has_value() && !query.faceLike->empty())
+    {
+        sql += "AND (e.face_code LIKE ? COLLATE NOCASE "
+               "OR e.face_name LIKE ? COLLATE NOCASE) ";
+    }
+    sql += "ORDER BY e.created_at_ms DESC, e.id DESC LIMIT ?;";
+
     sqlite3_stmt* statement = nullptr;
     if (sqlite3_prepare_v2(
             database_,
-            kRecentRecognitionEventsSql,
+            sql.c_str(),
             -1,
             &statement,
             nullptr)
@@ -1154,7 +1695,44 @@ FaceRecognitionEvents SQLiteDetectionStorage::recentFaceRecognitionEvents(
         return {};
     }
 
-    if (sqlite3_bind_int64(statement, 1, boundedLimit(maxCount)) != SQLITE_OK)
+    int parameterIndex = 1;
+    bool bound = true;
+    auto bindInt64 = [&](std::int64_t value) {
+        bound = bound
+            && sqlite3_bind_int64(statement, parameterIndex++, value) == SQLITE_OK;
+    };
+    auto bindText = [&](const std::string& value) {
+        bound = bound
+            && sqlite3_bind_text(
+                   statement,
+                   parameterIndex++,
+                   value.c_str(),
+                   -1,
+                   SQLITE_TRANSIENT)
+                == SQLITE_OK;
+    };
+
+    if (query.sessionId.has_value())
+    {
+        bindInt64(*query.sessionId);
+    }
+    if (query.sourceLike.has_value() && !query.sourceLike->empty())
+    {
+        bindText(likePattern(*query.sourceLike));
+    }
+    if (query.eventType.has_value() && !query.eventType->empty())
+    {
+        bindText(*query.eventType);
+    }
+    if (query.faceLike.has_value() && !query.faceLike->empty())
+    {
+        const std::string pattern = likePattern(*query.faceLike);
+        bindText(pattern);
+        bindText(pattern);
+    }
+    bindInt64(boundedLimit(query.limit));
+
+    if (!bound)
     {
         setLastErrorLocked("Could not bind recognition event query");
         sqlite3_finalize(statement);
@@ -1172,15 +1750,24 @@ FaceRecognitionEvents SQLiteDetectionStorage::recentFaceRecognitionEvents(
         event.sourceId = textColumn(statement, 3);
         event.frameIndex = sqlite3_column_int64(statement, 4);
         event.ptsMs = sqlite3_column_int64(statement, 5);
-        event.eventType = textColumn(statement, 6);
-        event.faceId = optionalInt64Column(statement, 7);
-        event.faceCode = textColumn(statement, 8);
-        event.faceName = textColumn(statement, 9);
-        event.distance = static_cast<float>(sqlite3_column_double(statement, 10));
-        event.similarity = static_cast<float>(sqlite3_column_double(statement, 11));
-        event.threshold = static_cast<float>(sqlite3_column_double(statement, 12));
-        event.recognizerName = textColumn(statement, 13);
-        event.createdAtMs = sqlite3_column_int64(statement, 14);
+        event.trackId = sqlite3_column_int64(statement, 6);
+        event.eventType = textColumn(statement, 7);
+        event.faceId = optionalInt64Column(statement, 8);
+        event.faceCode = textColumn(statement, 9);
+        event.faceName = textColumn(statement, 10);
+        event.distance = static_cast<float>(sqlite3_column_double(statement, 11));
+        event.similarity = static_cast<float>(sqlite3_column_double(statement, 12));
+        event.threshold = static_cast<float>(sqlite3_column_double(statement, 13));
+        event.recognizerName = textColumn(statement, 14);
+        event.createdAtMs = sqlite3_column_int64(statement, 15);
+        event.trackDurationMs = sqlite3_column_int64(statement, 16);
+        event.trackActive = sqlite3_column_int(statement, 17) != 0;
+        event.trackFirstDecision = textColumn(statement, 18);
+        event.trackFirstFaceCode = textColumn(statement, 19);
+        event.trackFirstFaceName = textColumn(statement, 20);
+        event.trackLastDecision = textColumn(statement, 21);
+        event.trackLastFaceCode = textColumn(statement, 22);
+        event.trackLastFaceName = textColumn(statement, 23);
         events.push_back(std::move(event));
     }
 
@@ -1196,6 +1783,85 @@ FaceRecognitionEvents SQLiteDetectionStorage::recentFaceRecognitionEvents(
 
     sqlite3_finalize(statement);
     return events;
+}
+
+bool SQLiteDetectionStorage::deleteRecognitionEvents(
+    const FaceRecognitionEventQuery& query,
+    std::size_t* deletedCount)
+{
+    if (deletedCount != nullptr)
+    {
+        *deletedCount = 0;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (database_ == nullptr)
+    {
+        lastError_ = "SQLite database is not open.";
+        return false;
+    }
+
+    std::string selectionSql =
+        "SELECT e.id FROM face_recognition_events e WHERE 1 = 1";
+    appendRecognitionEventFilterConditions(selectionSql, query);
+    const std::string sql =
+        "DELETE FROM face_recognition_events WHERE id IN ("
+        + selectionSql
+        + ");";
+
+    if (!executeLocked("BEGIN IMMEDIATE TRANSACTION;"))
+    {
+        return false;
+    }
+
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(
+            database_,
+            sql.c_str(),
+            -1,
+            &statement,
+            nullptr)
+        != SQLITE_OK)
+    {
+        setLastErrorLocked("Could not prepare recognition event delete");
+        executeLocked("ROLLBACK;");
+        return false;
+    }
+
+    int parameterIndex = 1;
+    const bool bound =
+        bindRecognitionEventFilterConditions(
+            statement,
+            query,
+            &parameterIndex);
+    const bool completed = bound && sqlite3_step(statement) == SQLITE_DONE;
+    const std::size_t removedEvents = completed
+        ? static_cast<std::size_t>(std::max(0, sqlite3_changes(database_)))
+        : 0;
+    if (!completed)
+    {
+        setLastErrorLocked("Could not delete recognition events");
+    }
+    sqlite3_finalize(statement);
+
+    if (!completed)
+    {
+        executeLocked("ROLLBACK;");
+        return false;
+    }
+
+    if (!executeLocked("COMMIT;"))
+    {
+        executeLocked("ROLLBACK;");
+        return false;
+    }
+
+    if (deletedCount != nullptr)
+    {
+        *deletedCount = removedEvents;
+    }
+    lastError_.clear();
+    return true;
 }
 
 bool SQLiteDetectionStorage::removeFaceIdentity(std::int64_t faceId)
@@ -1391,7 +2057,18 @@ bool SQLiteDetectionStorage::createSchemaLocked()
                "detection_face_links",
                "recognizer_name",
                "ALTER TABLE detection_face_links "
-               "ADD COLUMN recognizer_name TEXT NOT NULL DEFAULT '';");
+               "ADD COLUMN recognizer_name TEXT NOT NULL DEFAULT '';")
+        && ensureColumnLocked(
+               "detection_records",
+               "track_id",
+               "ALTER TABLE detection_records "
+               "ADD COLUMN track_id INTEGER NOT NULL DEFAULT 0;")
+        && ensureColumnLocked(
+               "face_recognition_events",
+               "track_id",
+               "ALTER TABLE face_recognition_events "
+               "ADD COLUMN track_id INTEGER NOT NULL DEFAULT 0;")
+        && executeLocked(kCreateTrackIndexesSql);
 }
 
 bool SQLiteDetectionStorage::ensureColumnLocked(
@@ -1538,14 +2215,15 @@ bool SQLiteDetectionStorage::insertDetectionLocked(
         && sqlite3_bind_text(statement, 2, sourceId.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK
         && sqlite3_bind_int64(statement, 3, frameIndex) == SQLITE_OK
         && sqlite3_bind_int64(statement, 4, ptsMs) == SQLITE_OK
-        && sqlite3_bind_int(statement, 5, result.classId) == SQLITE_OK
-        && sqlite3_bind_text(statement, 6, result.className.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK
-        && sqlite3_bind_double(statement, 7, result.confidence) == SQLITE_OK
-        && sqlite3_bind_double(statement, 8, result.box.x) == SQLITE_OK
-        && sqlite3_bind_double(statement, 9, result.box.y) == SQLITE_OK
-        && sqlite3_bind_double(statement, 10, result.box.width) == SQLITE_OK
-        && sqlite3_bind_double(statement, 11, result.box.height) == SQLITE_OK
-        && sqlite3_bind_int64(statement, 12, recordedAtMs) == SQLITE_OK;
+        && sqlite3_bind_int64(statement, 5, result.trackId) == SQLITE_OK
+        && sqlite3_bind_int(statement, 6, result.classId) == SQLITE_OK
+        && sqlite3_bind_text(statement, 7, result.className.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK
+        && sqlite3_bind_double(statement, 8, result.confidence) == SQLITE_OK
+        && sqlite3_bind_double(statement, 9, result.box.x) == SQLITE_OK
+        && sqlite3_bind_double(statement, 10, result.box.y) == SQLITE_OK
+        && sqlite3_bind_double(statement, 11, result.box.width) == SQLITE_OK
+        && sqlite3_bind_double(statement, 12, result.box.height) == SQLITE_OK
+        && sqlite3_bind_int64(statement, 13, recordedAtMs) == SQLITE_OK;
     const bool completed =
         bound && sqlite3_step(statement) == SQLITE_DONE;
     if (!completed)
@@ -1555,6 +2233,99 @@ bool SQLiteDetectionStorage::insertDetectionLocked(
     else
     {
         *recordId = sqlite3_last_insert_rowid(database_);
+    }
+
+    sqlite3_finalize(statement);
+    return completed;
+}
+
+bool SQLiteDetectionStorage::upsertFaceTrackLocked(
+    std::int64_t sessionId,
+    const FaceTrackSnapshot& snapshot,
+    std::int64_t updatedAtMs)
+{
+    if (sessionId <= 0 || snapshot.trackId <= 0)
+    {
+        lastError_ = "Face track snapshot arguments are invalid.";
+        return false;
+    }
+
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(
+            database_,
+            kUpsertFaceTrackSql,
+            -1,
+            &statement,
+            nullptr)
+        != SQLITE_OK)
+    {
+        setLastErrorLocked("Could not prepare face track upsert");
+        return false;
+    }
+
+    int parameterIndex = 1;
+    bool bound = true;
+    auto bindInt64 = [&](std::int64_t value) {
+        bound = bound
+            && sqlite3_bind_int64(statement, parameterIndex++, value) == SQLITE_OK;
+    };
+    auto bindInt = [&](int value) {
+        bound = bound
+            && sqlite3_bind_int(statement, parameterIndex++, value) == SQLITE_OK;
+    };
+    auto bindDouble = [&](float value) {
+        bound = bound
+            && sqlite3_bind_double(statement, parameterIndex++, value) == SQLITE_OK;
+    };
+    auto bindText = [&](const std::string& value) {
+        bound = bound
+            && sqlite3_bind_text(
+                   statement,
+                   parameterIndex++,
+                   value.c_str(),
+                   -1,
+                   SQLITE_TRANSIENT)
+                == SQLITE_OK;
+    };
+    auto bindOptionalFaceId = [&](const std::optional<std::int64_t>& faceId) {
+        bound = bound
+            && (faceId.has_value()
+                    ? sqlite3_bind_int64(statement, parameterIndex++, *faceId)
+                    : sqlite3_bind_null(statement, parameterIndex++))
+                == SQLITE_OK;
+    };
+    auto bindRecognitionState = [&](const FaceTrackRecognitionState& state) {
+        bindText(state.decision);
+        bindOptionalFaceId(state.faceId);
+        bindText(state.faceCode);
+        bindText(state.faceName);
+        bindDouble(state.similarity);
+        bindDouble(state.threshold);
+        bindInt64(state.observedAtPtsMs);
+    };
+
+    bindInt64(sessionId);
+    bindText(snapshot.sourceId);
+    bindInt64(snapshot.trackId);
+    bindInt(snapshot.classId);
+    bindText(snapshot.className);
+    bindInt64(snapshot.firstFrameIndex);
+    bindInt64(snapshot.firstPtsMs);
+    bindInt64(snapshot.lastFrameIndex);
+    bindInt64(snapshot.lastPtsMs);
+    bindInt64(snapshot.durationMs);
+    bindInt(snapshot.detectionCount);
+    bindInt(snapshot.missedUpdates);
+    bindInt(snapshot.active ? 1 : 0);
+    bindRecognitionState(snapshot.firstRecognition);
+    bindRecognitionState(snapshot.lastRecognition);
+    bindInt64(updatedAtMs);
+    bindInt64(updatedAtMs);
+
+    const bool completed = bound && sqlite3_step(statement) == SQLITE_DONE;
+    if (!completed)
+    {
+        setLastErrorLocked("Could not upsert face track");
     }
 
     sqlite3_finalize(statement);
@@ -1624,12 +2395,13 @@ bool SQLiteDetectionStorage::insertRecognitionEventLocked(
     std::int64_t fallbackFrameIndex,
     std::int64_t fallbackPtsMs,
     const DetectionResult& result,
+    const std::string& eventType,
+    const std::optional<std::int64_t>& faceId,
     std::int64_t createdAtMs)
 {
     if (recordId <= 0
         || sessionId <= 0
-        || !result.face.matched
-        || !result.face.faceId.has_value())
+        || eventType.empty())
     {
         lastError_ = "Recognition event arguments are invalid.";
         return false;
@@ -1670,39 +2442,42 @@ bool SQLiteDetectionStorage::insertRecognitionEventLocked(
             == SQLITE_OK
         && sqlite3_bind_int64(statement, 4, frameIndex) == SQLITE_OK
         && sqlite3_bind_int64(statement, 5, ptsMs) == SQLITE_OK
+        && sqlite3_bind_int64(statement, 6, result.trackId) == SQLITE_OK
         && sqlite3_bind_text(
                statement,
-               6,
-               "face_recognized",
+               7,
+               eventType.c_str(),
                -1,
-               SQLITE_STATIC)
+               SQLITE_TRANSIENT)
             == SQLITE_OK
-        && sqlite3_bind_int64(statement, 7, *result.face.faceId) == SQLITE_OK
+        && (faceId.has_value()
+                ? sqlite3_bind_int64(statement, 8, *faceId) == SQLITE_OK
+                : sqlite3_bind_null(statement, 8) == SQLITE_OK)
         && sqlite3_bind_text(
                statement,
-               8,
+               9,
                result.face.faceCode.c_str(),
                -1,
                SQLITE_TRANSIENT)
             == SQLITE_OK
         && sqlite3_bind_text(
                statement,
-               9,
+               10,
                result.face.faceName.c_str(),
                -1,
                SQLITE_TRANSIENT)
             == SQLITE_OK
-        && sqlite3_bind_double(statement, 10, result.face.distance) == SQLITE_OK
-        && sqlite3_bind_double(statement, 11, result.face.similarity) == SQLITE_OK
-        && sqlite3_bind_double(statement, 12, result.face.threshold) == SQLITE_OK
+        && sqlite3_bind_double(statement, 11, result.face.distance) == SQLITE_OK
+        && sqlite3_bind_double(statement, 12, result.face.similarity) == SQLITE_OK
+        && sqlite3_bind_double(statement, 13, result.face.threshold) == SQLITE_OK
         && sqlite3_bind_text(
                statement,
-               13,
+               14,
                result.face.recognizerName.c_str(),
                -1,
                SQLITE_TRANSIENT)
             == SQLITE_OK
-        && sqlite3_bind_int64(statement, 14, createdAtMs) == SQLITE_OK;
+        && sqlite3_bind_int64(statement, 15, createdAtMs) == SQLITE_OK;
     const bool completed = bound && sqlite3_step(statement) == SQLITE_DONE;
     if (!completed)
     {
@@ -1716,13 +2491,15 @@ bool SQLiteDetectionStorage::insertRecognitionEventLocked(
 bool SQLiteDetectionStorage::shouldInsertRecognitionEventLocked(
     std::int64_t sessionId,
     const std::string& sourceId,
-    std::int64_t faceId,
+    const std::string& eventType,
+    const std::optional<std::int64_t>& faceId,
+    std::int64_t trackId,
     std::int64_t createdAtMs,
     bool* shouldInsert)
 {
     if (shouldInsert == nullptr
         || sessionId <= 0
-        || faceId <= 0
+        || eventType.empty()
         || createdAtMs <= 0)
     {
         lastError_ = "Recognition event deduplication arguments are invalid.";
@@ -1730,10 +2507,24 @@ bool SQLiteDetectionStorage::shouldInsertRecognitionEventLocked(
     }
 
     *shouldInsert = true;
+    const bool useTrackDeduplication = trackId > 0;
+    std::string sql = useTrackDeduplication
+        ? kTrackRecognitionEventBaseSql
+        : kRecentRecognitionEventBaseSql;
+    if (faceId.has_value())
+    {
+        sql += "AND face_identity_id = ? ";
+    }
+    else
+    {
+        sql += "AND face_identity_id IS NULL ";
+    }
+    sql += "ORDER BY id DESC LIMIT 1;";
+
     sqlite3_stmt* statement = nullptr;
     if (sqlite3_prepare_v2(
             database_,
-            kRecentRecognitionEventForFaceSql,
+            sql.c_str(),
             -1,
             &statement,
             nullptr)
@@ -1743,9 +2534,7 @@ bool SQLiteDetectionStorage::shouldInsertRecognitionEventLocked(
         return false;
     }
 
-    const std::int64_t cutoffMs =
-        std::max<std::int64_t>(0, createdAtMs - kRecognitionEventCooldownMs);
-    const bool bound =
+    bool bound =
         sqlite3_bind_int64(statement, 1, sessionId) == SQLITE_OK
         && sqlite3_bind_text(
                statement,
@@ -1753,10 +2542,44 @@ bool SQLiteDetectionStorage::shouldInsertRecognitionEventLocked(
                sourceId.c_str(),
                -1,
                SQLITE_TRANSIENT)
-            == SQLITE_OK
-        && sqlite3_bind_int64(statement, 3, faceId) == SQLITE_OK
-        && sqlite3_bind_int64(statement, 4, cutoffMs) == SQLITE_OK;
-    if (!bound)
+            == SQLITE_OK;
+    int identityParameterIndex = 5;
+    if (useTrackDeduplication)
+    {
+        bound = bound
+            && sqlite3_bind_int64(statement, 3, trackId) == SQLITE_OK
+            && sqlite3_bind_text(
+                   statement,
+                   4,
+                   eventType.c_str(),
+                   -1,
+                   SQLITE_TRANSIENT)
+                == SQLITE_OK;
+    }
+    else
+    {
+        const std::int64_t cutoffMs =
+            std::max<std::int64_t>(
+                0,
+                createdAtMs - kRecognitionEventCooldownMs);
+        bound = bound
+            && sqlite3_bind_text(
+                   statement,
+                   3,
+                   eventType.c_str(),
+                   -1,
+                   SQLITE_TRANSIENT)
+                == SQLITE_OK
+            && sqlite3_bind_int64(statement, 4, cutoffMs) == SQLITE_OK;
+    }
+    const bool identityBound = !bound
+        || !faceId.has_value()
+        || sqlite3_bind_int64(
+               statement,
+               identityParameterIndex,
+               *faceId)
+            == SQLITE_OK;
+    if (!bound || !identityBound)
     {
         setLastErrorLocked("Could not bind recognition event deduplication query");
         sqlite3_finalize(statement);
@@ -1818,22 +2641,84 @@ DetectionResults SQLiteDetectionStorage::readResultsLocked(
         result.sourceId = textColumn(statement, 0);
         result.frameIndex = sqlite3_column_int64(statement, 1);
         result.ptsMs = sqlite3_column_int64(statement, 2);
-        result.classId = sqlite3_column_int(statement, 3);
-        result.className = textColumn(statement, 4);
-        result.confidence = static_cast<float>(sqlite3_column_double(statement, 5));
-        result.box.x = static_cast<float>(sqlite3_column_double(statement, 6));
-        result.box.y = static_cast<float>(sqlite3_column_double(statement, 7));
-        result.box.width = static_cast<float>(sqlite3_column_double(statement, 8));
-        result.box.height = static_cast<float>(sqlite3_column_double(statement, 9));
-        result.face.faceId = optionalInt64Column(statement, 10);
+        result.trackId = sqlite3_column_int64(statement, 3);
+        result.classId = sqlite3_column_int(statement, 4);
+        result.className = textColumn(statement, 5);
+        result.confidence = static_cast<float>(sqlite3_column_double(statement, 6));
+        result.box.x = static_cast<float>(sqlite3_column_double(statement, 7));
+        result.box.y = static_cast<float>(sqlite3_column_double(statement, 8));
+        result.box.width = static_cast<float>(sqlite3_column_double(statement, 9));
+        result.box.height = static_cast<float>(sqlite3_column_double(statement, 10));
+        result.face.faceId = optionalInt64Column(statement, 11);
         result.face.matched = result.face.faceId.has_value();
-        result.face.faceCode = textColumn(statement, 11);
-        result.face.faceName = textColumn(statement, 12);
-        result.face.matchedAtMs = sqlite3_column_int64(statement, 13);
-        result.face.distance = static_cast<float>(sqlite3_column_double(statement, 14));
-        result.face.similarity = static_cast<float>(sqlite3_column_double(statement, 15));
-        result.face.threshold = static_cast<float>(sqlite3_column_double(statement, 16));
-        result.face.recognizerName = textColumn(statement, 17);
+        result.face.faceCode = textColumn(statement, 12);
+        result.face.faceName = textColumn(statement, 13);
+        result.face.matchedAtMs = sqlite3_column_int64(statement, 14);
+        result.face.distance = static_cast<float>(sqlite3_column_double(statement, 15));
+        result.face.similarity = static_cast<float>(sqlite3_column_double(statement, 16));
+        result.face.threshold = static_cast<float>(sqlite3_column_double(statement, 17));
+        result.face.recognizerName = textColumn(statement, 18);
+        if (optionalInt64Column(statement, 19).has_value())
+        {
+            result.trackState.trackId = result.trackId;
+            result.trackState.sourceId = result.sourceId;
+            result.trackState.classId = result.classId;
+            result.trackState.className = result.className;
+            result.trackState.firstFrameIndex =
+                sqlite3_column_int64(statement, 20);
+            result.trackState.firstPtsMs =
+                sqlite3_column_int64(statement, 21);
+            result.trackState.lastFrameIndex =
+                sqlite3_column_int64(statement, 22);
+            result.trackState.lastPtsMs =
+                sqlite3_column_int64(statement, 23);
+            result.trackState.durationMs =
+                sqlite3_column_int64(statement, 24);
+            result.trackState.detectionCount =
+                sqlite3_column_int(statement, 25);
+            result.trackState.missedUpdates =
+                sqlite3_column_int(statement, 26);
+            result.trackState.active =
+                sqlite3_column_int(statement, 27) != 0;
+
+            result.trackState.firstRecognition.decision =
+                textColumn(statement, 28);
+            result.trackState.firstRecognition.available =
+                !result.trackState.firstRecognition.decision.empty();
+            result.trackState.firstRecognition.faceId =
+                optionalInt64Column(statement, 29);
+            result.trackState.firstRecognition.faceCode =
+                textColumn(statement, 30);
+            result.trackState.firstRecognition.faceName =
+                textColumn(statement, 31);
+            result.trackState.firstRecognition.similarity =
+                static_cast<float>(sqlite3_column_double(statement, 32));
+            result.trackState.firstRecognition.threshold =
+                static_cast<float>(sqlite3_column_double(statement, 33));
+            result.trackState.firstRecognition.observedAtPtsMs =
+                sqlite3_column_int64(statement, 34);
+            result.trackState.firstRecognition.matched =
+                result.trackState.firstRecognition.faceId.has_value();
+
+            result.trackState.lastRecognition.decision =
+                textColumn(statement, 35);
+            result.trackState.lastRecognition.available =
+                !result.trackState.lastRecognition.decision.empty();
+            result.trackState.lastRecognition.faceId =
+                optionalInt64Column(statement, 36);
+            result.trackState.lastRecognition.faceCode =
+                textColumn(statement, 37);
+            result.trackState.lastRecognition.faceName =
+                textColumn(statement, 38);
+            result.trackState.lastRecognition.similarity =
+                static_cast<float>(sqlite3_column_double(statement, 39));
+            result.trackState.lastRecognition.threshold =
+                static_cast<float>(sqlite3_column_double(statement, 40));
+            result.trackState.lastRecognition.observedAtPtsMs =
+                sqlite3_column_int64(statement, 41);
+            result.trackState.lastRecognition.matched =
+                result.trackState.lastRecognition.faceId.has_value();
+        }
         results.push_back(std::move(result));
     }
 

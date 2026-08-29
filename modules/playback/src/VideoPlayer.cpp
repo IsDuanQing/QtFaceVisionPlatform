@@ -197,7 +197,9 @@ VideoPlayer::VideoPlayer(QObject* parent)
       inferenceThread_(),
       errorMutex_(),
       detectorMutex_(),
+      faceTrackerMutex_(),
       faceRecognizerMutex_(),
+      faceTracker_(),
       faceRecognizer_(),
       fileName_(),
       lastError_(),
@@ -229,6 +231,7 @@ VideoPlayer::VideoPlayer(QObject* parent)
       framePending_(false)
 {
     qRegisterMetaType<ivp::DetectionResults>("ivp::DetectionResults");
+    qRegisterMetaType<ivp::FaceTrackSnapshots>("ivp::FaceTrackSnapshots");
     qRegisterMetaType<ivp::RuntimeStatus>("ivp::RuntimeStatus");
     ivp::FaceRecognitionConfig faceRecognitionConfig;
     faceRecognitionConfig.featureModelPath =
@@ -278,22 +281,21 @@ bool VideoPlayer::openRtsp(const QString& rtspUrl)
 
 void VideoPlayer::setDetectorConfig(const ivp::DetectorConfig& config)
 {
+    std::lock_guard<std::mutex> lock(detectorMutex_);
     detectorConfig_ = config;
 }
 
 bool VideoPlayer::applyDetectorConfig(const ivp::DetectorConfig& config)
 {
-    const ivp::DetectorConfig previousConfig = detectorConfig_;
-    detectorConfig_ = config;
     clearLastError();
 
+    std::lock_guard<std::mutex> lock(detectorMutex_);
+    const ivp::DetectorConfig previousConfig = detectorConfig_;
+    detectorConfig_ = config;
+    if (!initializeDetector())
     {
-        std::lock_guard<std::mutex> lock(detectorMutex_);
-        if (!initializeDetector())
-        {
-            detectorConfig_ = previousConfig;
-            return false;
-        }
+        detectorConfig_ = previousConfig;
+        return false;
     }
 
     return true;
@@ -301,7 +303,37 @@ bool VideoPlayer::applyDetectorConfig(const ivp::DetectorConfig& config)
 
 ivp::DetectorConfig VideoPlayer::detectorConfig() const
 {
+    std::lock_guard<std::mutex> lock(detectorMutex_);
     return detectorConfig_;
+}
+
+void VideoPlayer::setFaceTrackerConfig(const ivp::FaceTrackerConfig& config)
+{
+    std::lock_guard<std::mutex> lock(faceTrackerMutex_);
+    faceTracker_.setConfig(config);
+}
+
+bool VideoPlayer::applyFaceTrackerConfig(
+    const ivp::FaceTrackerConfig& config)
+{
+    std::lock_guard<std::mutex> lock(faceTrackerMutex_);
+    // A changed association rule cannot be applied safely to existing tracks.
+    // Close them first so their final snapshot is still available to storage.
+    faceTracker_.finish();
+    faceTracker_.setConfig(config);
+    return true;
+}
+
+ivp::FaceTrackerConfig VideoPlayer::faceTrackerConfig() const
+{
+    std::lock_guard<std::mutex> lock(faceTrackerMutex_);
+    return faceTracker_.config();
+}
+
+ivp::FaceTrackSnapshots VideoPlayer::takeEndedFaceTracks()
+{
+    std::lock_guard<std::mutex> lock(faceTrackerMutex_);
+    return faceTracker_.takeEndedTracks();
 }
 
 bool VideoPlayer::applyFaceRecognitionConfig(
@@ -488,6 +520,7 @@ void VideoPlayer::stop()
         }
     }
 
+    finishFaceTracking();
     resetSyncState();
     setRuntimeState(opened_ ? ivp::RuntimeState::Ready : ivp::RuntimeState::Idle);
     emitState();
@@ -969,6 +1002,7 @@ void VideoPlayer::inferenceLoop()
         ivp::DetectionResults results;
         std::string detectorError;
         std::string detectorName;
+        bool detectorRanForFrame = true;
         QElapsedTimer inferenceTimer;
         inferenceTimer.start();
         {
@@ -980,6 +1014,10 @@ void VideoPlayer::inferenceLoop()
             results = detector_->detect(*frame);
             detectorError = detector_->lastError();
             detectorName = detector_->name();
+            const int detectEveryNFrames =
+                std::max(1, detectorConfig_.detectEveryNFrames);
+            detectorRanForFrame =
+                frameIndex % detectEveryNFrames == 0;
         }
         if (!detectorError.empty())
         {
@@ -992,6 +1030,7 @@ void VideoPlayer::inferenceLoop()
             break;
         }
 
+        updateFaceTracking(*frame, detectorRanForFrame, &results);
         applyFaceRecognition(*frame, &results);
 
         ++consumedFrames;
@@ -1058,6 +1097,7 @@ void VideoPlayer::handleProducerFinished()
 
     playing_ = false;
     stopProducerThread();
+    finishFaceTracking();
 
     if (message.isEmpty())
     {
@@ -1211,7 +1251,32 @@ bool VideoPlayer::initializeDetector()
     }
 
     detector_ = std::move(candidate);
+    finishFaceTracking();
     return true;
+}
+
+void VideoPlayer::finishFaceTracking()
+{
+    std::lock_guard<std::mutex> lock(faceTrackerMutex_);
+    faceTracker_.finish();
+}
+
+void VideoPlayer::updateFaceTracking(
+    const ivp::VideoFrame& frame,
+    bool detectorRanForFrame,
+    ivp::DetectionResults* results)
+{
+    if (results == nullptr || !detectorRanForFrame)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(faceTrackerMutex_);
+    faceTracker_.update(
+        frame.metadata.frameIndex,
+        frame.metadata.ptsMs,
+        frame.metadata.sourceId,
+        results);
 }
 
 void VideoPlayer::applyFaceRecognition(
@@ -1230,4 +1295,7 @@ void VideoPlayer::applyFaceRecognition(
             faceRecognizer_.recognize(frame, result);
         result.face = recognition;
     }
+
+    std::lock_guard<std::mutex> trackerLock(faceTrackerMutex_);
+    faceTracker_.updateRecognition(results);
 }
